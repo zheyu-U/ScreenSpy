@@ -1,5 +1,4 @@
 using System;
-using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -9,19 +8,18 @@ using ScreenSpy.Collector;
 using ScreenSpy.Desktop;
 using ScreenSpy.Diagnostics;
 using ScreenSpy.Interop;
+using ScreenSpy.Rendering;
 using ScreenSpy.Scheduling;
+using ScreenSpy.Widget;
 
 namespace ScreenSpy.Demo;
 
 /// <summary>
-/// 桌面卡片的临时演示入口（随 M0 结论一并落地）。
+/// 桌面卡片的演示入口（随 M0 结论一并落地，**长期保留**）。
 ///
-/// 用途：在没有 UI / 没有真实统计数据之前，验证“抽回产品工程后的 B+ 代码”确实能工作。
-/// 它不是产品功能，M5（托盘 + 主界面）完成后应当删除。
-///
-/// 用法：
-///   ScreenSpy.exe --demo-card [--seconds=8] [--x=200] [--y=700] [--no-marker] [--win-d]
-///                            [--m1] [--idle-threshold=300] [--settle-ms=1500] [--out=artifacts] [--name=product-demo]
+/// 用途：把「B+ 桌面层确实能工作」这件事**随时可复现地**验证一遍（含截屏像素判定），
+/// 也是 M7 双形态中“嵌入形态”唯一的独立观测手段 —— 产品形态由组合根与托盘驱动，
+/// 不便反复重放 Win+D 这类场景。
 ///
 /// 判定原则（沿用 M0 最重要的教训）：只认**截屏像素**，不认 API 返回值。
 /// </summary>
@@ -60,7 +58,7 @@ internal static class DesktopCardDemo
         string name = GetString(args, "--name=") ?? "product-demo";
 
         Console.WriteLine("============ ScreenSpy 桌面卡片 · 产品工程演示（演示入口）============");
-        Console.WriteLine($"卡片位置 ({x},{y})，尺寸 {DesktopCardHost.DefaultWidth}×{DesktopCardHost.DefaultHeight}，运行 {seconds} 秒");
+        Console.WriteLine($"卡片位置 ({x},{y})，尺寸 {CardWindow.DefaultWidth}×{CardWindow.DefaultHeight}（嵌入形态），运行 {seconds} 秒");
         Console.WriteLine($"标记方块={marker}，Win+D 检测={testWinD}，M1 实时数据={useM1}，M3 按软件统计={useM3}");
         Console.WriteLine();
 
@@ -71,8 +69,6 @@ internal static class DesktopCardDemo
         Console.Write(DesktopShell.CaptureTopology());
         Console.WriteLine("----------------------");
         Console.WriteLine();
-
-        using var card = new DesktopCardHost(x, y, debugMarker: marker ? DesktopCardHost.DefaultDebugMarker : null);
 
         // --m1：把 M1 调度器采集到的**真实**活跃时长接到卡片上；
         // --m3：再加上 M3 的按软件统计（隐含启动 M1 调度器）；都不给则用演示假数据。
@@ -88,59 +84,47 @@ internal static class DesktopCardDemo
             Console.WriteLine($"M1 调度器  ：已启动（空闲阈值 {idleThresholdSec}s，心跳 {scheduler.Heartbeat.TotalMilliseconds:F0}ms）");
         }
 
+        Func<CardModel> modelFactory = () => DemoCardData.Build(0);
+
         if (useM3)
         {
             appSource = new Win32ForegroundAppSource();
             usageBridge = new AppUsageBridge(scheduler!, appSource);
             Console.WriteLine($"M3 前台源  ：{(appSource.IsAvailable ? "可用" : "不可用")}（即时采样：{appSource.Sample()}）");
-            card.ModelFactory = t => AppLiveCardData.Build(t, usageBridge.Tracker, scheduler!);
+            AppUsageBridge bridge = usageBridge;
+            ActivityScheduler sched = scheduler!;
+            modelFactory = () => AppLiveCardData.Build(0, bridge.Tracker, sched);
         }
         else if (useM1)
         {
-            card.ModelFactory = t => LiveCardData.Build(t, scheduler!);
+            modelFactory = () => LiveCardData.Build(0, scheduler!);
         }
-        else
-        {
-            card.ModelFactory = DemoCardData.Build;
-        }
+
+        // 卡片：**嵌入形态**（M7 的默认形态，与产品一致）。
+        // 取数函数在构造时传入 —— 卡片每秒拉一次，正是本项目“绑定”的做法。
+        using var card = new CardWindow(modelFactory, WidgetMode.Embedded, x, y,
+                                        debugMarker: marker ? CardWindow.DefaultDebugMarker : null);
 
         // 原始活动日志（旁路，不改动归属逻辑）：默认开启、仅变化时记录；
         // --no-raw-log 关闭，--log-dir=<path> 改目录。开发期默认落在 artifacts 下。
         RawLogProbe? rawLog = usageBridge is null ? null : RawLogProbe.Create(usageBridge, args, "demo-rawlog");
 
-        Exception? failure = null;
-        var thread = new Thread(() =>
+        // CardWindow.Start() 自己拉起带消息循环的 STA 线程，并在首帧画完后才返回。
+        if (!card.Start())
         {
-            try
-            {
-                card.Start(autoCloseSeconds: seconds + 15);
-                card.RunMessageLoop();
-            }
-            catch (Exception ex)
-            {
-                failure = ex;
-            }
+            Console.WriteLine("!! 卡片启动失败：" + (card.LastError ?? "未知原因"));
+            return 4;
+        }
+
+        // 兜底看门狗：无论中途哪一步卡住，最多 seconds + 15 秒就自行关闭。
+        // （否则一个卡死的卡片会让演示进程留在后台，而看起来像“还在正常跑”。）
+        var watchdog = new Thread(() =>
+        {
+            Thread.Sleep(TimeSpan.FromSeconds(seconds + 15));
+            try { card.RequestClose(); } catch { /* 忽略 */ }
         })
-        { IsBackground = false, Name = "screenspy-card" };
-        try { thread.SetApartmentState(ApartmentState.STA); } catch { /* 平台不支持时忽略 */ }
-
-        thread.Start();
-
-        var sw = Stopwatch.StartNew();
-        while (card.Handle == IntPtr.Zero && sw.Elapsed < TimeSpan.FromSeconds(10) && failure is null)
-            Thread.Sleep(50);
-
-        if (failure is not null)
-        {
-            Console.WriteLine("!! 卡片启动失败：");
-            Console.WriteLine(failure);
-            return 4;
-        }
-        if (card.Handle == IntPtr.Zero)
-        {
-            Console.WriteLine("!! 10 秒内未创建卡片窗口。");
-            return 4;
-        }
+        { IsBackground = true, Name = "screenspy-demo-watchdog" };
+        watchdog.Start();
 
         Console.WriteLine($"卡片窗口已创建：hwnd=0x{card.Handle.ToInt64():X}");
         Console.WriteLine($"扩展样式      ：{card.DescribeExStyle()}");
@@ -200,7 +184,7 @@ internal static class DesktopCardDemo
         Console.WriteLine($"累计：采样 {card.Polls} 次，状态切换 {card.Transitions} 次，绘制 {card.Frames} 帧，Elevated={card.Elevated}");
 
         card.RequestClose();
-        if (!thread.Join(TimeSpan.FromSeconds(10)))
+        if (!card.WaitForExit(10000))
         {
             Console.WriteLine("!! 卡片线程未在 10 秒内退出。");
             rc |= 8;
@@ -238,7 +222,7 @@ internal static class DesktopCardDemo
     }
 
     /// <summary>截屏 + 像素判定。返回非 0 表示失败。</summary>
-    private static int Probe(string label, DesktopCardHost card, string png, bool marker, bool decisive)
+    private static int Probe(string label, CardWindow card, string png, bool marker, bool decisive)
     {
         string path = ScreenCapture.Capture(png);
 
@@ -252,7 +236,7 @@ internal static class DesktopCardDemo
             return 0;
         }
 
-        var hit = ScreenCapture.Analyze(path, DesktopCardHost.DebugMarkerColor);
+        var hit = ScreenCapture.Analyze(path, CardWindow.DebugMarkerColor);
         Console.WriteLine($"   标记像素     ：{hit.Count}  包围盒={(hit.Count > 0 ? hit.Bounds.ToString() : "(无)")}");
 
         if (hit.Visible)

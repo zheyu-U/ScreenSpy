@@ -16,8 +16,12 @@ namespace ScreenSpy.AppHost;
 ///  * **菜单动作绝不把异常抛进消息循环** —— 统一走 <c>Safe</c>。
 ///  * 图标由 <see cref="TrayIconFactory"/> 程序化生成，并按「统计中 / 已暂停」两态切换。
 ///
-/// 菜单结构（本次确认）：打开主界面 / 暂停统计 / 调整组件位置（M8，禁用占位）/
-/// 设置（M8/M9，禁用占位）/ 退出。占位项**故意禁用** —— 点了没反应比“看起来能点”诚实。
+/// 菜单结构（M5b 建立，M6 加卡片项，M7 接上调整项）：
+/// 打开主界面 / 暂停统计 / [显示卡片·隐藏卡片] / [调整组件位置·完成调整] / 设置（M9，禁用占位）/ 退出。
+/// 方括号两项**只在接线了对应回调时出现** —— 不带卡片的宿主（例如 M5b 自检）看到的菜单
+/// 与 M5b 当时完全一致，形态不被悄悄改动。未接线的调整入口保留**禁用占位**：
+/// 点了没反应比“看起来能点”诚实。
+/// 调整项在“常态已是浮动”时也**禁用**（那时没有可调整的东西）—— 口径与主界面那个按钮一致。
 ///
 /// 线程：必须在 WPF 的 UI 线程（STA、有消息循环）上创建与释放。
 /// </summary>
@@ -30,12 +34,16 @@ internal sealed class TrayIconHost : IDisposable
     private readonly Forms.ToolStripMenuItem _openItem;
     private readonly Forms.ToolStripMenuItem _pauseItem;
     private readonly Forms.ToolStripMenuItem? _cardItem;
+    private readonly Forms.ToolStripMenuItem? _adjustItem;
     private readonly Forms.ToolStripMenuItem _exitItem;
     private readonly DispatcherTimer _timer;
     private readonly Func<RuntimeStatus> _snapshot;
     private readonly Action<bool> _setUserPaused;
     private readonly Func<bool>? _isCardVisible;
     private readonly Action<bool>? _setCardVisible;
+    private readonly Action? _toggleAdjust;
+    private readonly Func<bool>? _isAdjusting;
+    private readonly Func<bool>? _isAdjustAvailable;
     private readonly Action _exit;
 
     private bool _lastPaused;
@@ -47,12 +55,18 @@ internal sealed class TrayIconHost : IDisposable
                          Action openMainWindow,
                          Action exit,
                          Func<bool>? isCardVisible,
-                         Action<bool>? setCardVisible)
+                         Action<bool>? setCardVisible,
+                         Action? toggleAdjust,
+                         Func<bool>? isAdjusting,
+                         Func<bool>? isAdjustAvailable)
     {
         _snapshot = snapshot ?? throw new ArgumentNullException(nameof(snapshot));
         _setUserPaused = setUserPaused ?? throw new ArgumentNullException(nameof(setUserPaused));
         _isCardVisible = isCardVisible;
         _setCardVisible = setCardVisible;
+        _toggleAdjust = toggleAdjust;
+        _isAdjusting = isAdjusting;
+        _isAdjustAvailable = isAdjustAvailable;
         _exit = exit ?? throw new ArgumentNullException(nameof(exit));
 
         _normalIcon = TrayIconFactory.Create(paused: false);
@@ -81,8 +95,21 @@ internal sealed class TrayIconHost : IDisposable
 
         _menu.Items.Add(new Forms.ToolStripSeparator());
 
-        // M8 / M9 的入口先摆出来但禁用（已确认的决策），并明确标注“未实现”。
-        _menu.Items.Add(new Forms.ToolStripMenuItem("调整组件位置（M8 未实现）") { Enabled = false });
+        // M7：卡片「调整位置」入口。
+        // 接线了（= 真的有卡片）就是可点菜单项；没接线则保持 M5b/M6 时代的**禁用占位** ——
+        // 点了没反应比“看起来能点”诚实，而菜单形态本身也不被悄悄改动。
+        if (_toggleAdjust is not null)
+        {
+            _adjustItem = new Forms.ToolStripMenuItem("调整组件位置");
+            _adjustItem.Click += (_, _) => Safe(ToggleAdjust);
+            _menu.Items.Add(_adjustItem);
+        }
+        else
+        {
+            _menu.Items.Add(new Forms.ToolStripMenuItem("调整组件位置（M8 未实现）") { Enabled = false });
+        }
+
+        // M9 的入口先摆出来但禁用（已确认的决策），并明确标注“未实现”。
         _menu.Items.Add(new Forms.ToolStripMenuItem("设置（M8/M9 未实现）") { Enabled = false });
 
         _menu.Items.Add(new Forms.ToolStripSeparator());
@@ -108,26 +135,46 @@ internal sealed class TrayIconHost : IDisposable
     }
 
     /// <summary>
-    /// 尝试创建（不带卡片开关；菜单里不会出现卡片项）。
+    /// 尝试创建（不带卡片开关；菜单里不会出现卡片项，也没有可点的调整项）。
     /// 保留此重载是为了让 M5b 时代的调用与自检形态**原样不变**。
     /// </summary>
     public static TrayIconHost? TryCreate(Func<RuntimeStatus> snapshot,
                                           Action<bool> setUserPaused,
                                           Action openMainWindow,
                                           Action exit)
-        => TryCreate(snapshot, setUserPaused, openMainWindow, exit, isCardVisible: null, setCardVisible: null);
+        => TryCreate(snapshot, setUserPaused, openMainWindow, exit,
+                     isCardVisible: null, setCardVisible: null, toggleAdjust: null, isAdjusting: null);
 
-    /// <summary>尝试创建（M6：附带卡片的显示状态与开关）。任何失败都返回 null（调用方据此走降级路径）。</summary>
+    /// <summary>
+    /// 尝试创建（M6：附带卡片的显示状态与开关；M7：可再附「调整组件位置」）。
+    /// 任何失败都返回 null（调用方据此走降级路径）。
+    /// </summary>
+    /// <param name="toggleAdjust">
+    /// 「调整组件位置 / 完成调整」的动作。为 null 时菜单里保留**禁用占位**（M5b/M6 形态不变）。
+    /// </param>
+    /// <param name="isAdjusting">
+    /// 卡片当前是否处于调整形态。用于让菜单文案按**真实状态**回读，
+    /// 而不是按“我们以为点了会怎样”（否则从主界面进出调整时，这里会撒谎）。
+    /// </param>
+    /// <param name="isAdjustAvailable">
+    /// 「调整位置」当前是否**有意义**（常态已是浮动时无意义）。
+    /// 为 null 时按“可用”处理 —— 这样 M6/M7 已建立的调用形态与菜单形态原样不变。
+    /// 返回 false 时该菜单项**禁用**：点了没反应比“看起来能点”诚实。
+    /// </param>
     public static TrayIconHost? TryCreate(Func<RuntimeStatus> snapshot,
                                           Action<bool> setUserPaused,
                                           Action openMainWindow,
                                           Action exit,
                                           Func<bool>? isCardVisible,
-                                          Action<bool>? setCardVisible)
+                                          Action<bool>? setCardVisible,
+                                          Action? toggleAdjust = null,
+                                          Func<bool>? isAdjusting = null,
+                                          Func<bool>? isAdjustAvailable = null)
     {
         try
         {
-            return new TrayIconHost(snapshot, setUserPaused, openMainWindow, exit, isCardVisible, setCardVisible);
+            return new TrayIconHost(snapshot, setUserPaused, openMainWindow, exit,
+                                    isCardVisible, setCardVisible, toggleAdjust, isAdjusting, isAdjustAvailable);
         }
         catch
         {
@@ -149,6 +196,15 @@ internal sealed class TrayIconHost : IDisposable
 
         bool next = !_lastCardVisible;
         Safe(() => _setCardVisible(next));
+        Refresh();
+    }
+
+    /// <summary>切换「调整组件位置 / 完成调整」：动作交给上层，随后刷新菜单文案。</summary>
+    private void ToggleAdjust()
+    {
+        if (_toggleAdjust is null) return;
+
+        Safe(_toggleAdjust);
         Refresh();
     }
 
@@ -176,6 +232,18 @@ internal sealed class TrayIconHost : IDisposable
                 _lastCardVisible = visible;
                 _cardItem.Checked = visible;
                 _cardItem.Text = visible ? "隐藏卡片" : "显示卡片";
+            }
+
+            // 调整项同理：文案反映**卡片此刻真实的调整状态**（正在临时调整 → 显示“完成调整”）。
+            // 可用性与文案分开判断：常态已是浮动时“调整位置”无事可做 → **禁用**
+            // （而不是让它点了没反应；与主界面那个按钮的口径一致）。
+            if (_adjustItem is not null)
+            {
+                bool adjusting = _isAdjusting?.Invoke() ?? false;
+                bool available = _isAdjustAvailable?.Invoke() ?? true;
+
+                _adjustItem.Text = adjusting ? "完成调整" : "调整组件位置";
+                _adjustItem.Enabled = available;
             }
 
             _notifyIcon.Text = ComposeTooltip(status.TodayTotal, status.Paused, userPaused);
@@ -252,6 +320,17 @@ internal sealed class TrayIconHost : IDisposable
     {
         if (_cardItem is null) return false;
         _cardItem.PerformClick();
+        return true;
+    }
+
+    /// <summary>
+    /// **仅供自检与诊断**：走与真实点击「调整组件位置 / 完成调整」完全相同的路径。
+    /// 未接线（4 参 / M6 形态）时返回 false，便于自检断言“菜单里根本没有可点的调整项”。
+    /// </summary>
+    internal bool InvokeAdjustForDiagnostics()
+    {
+        if (_adjustItem is null) return false;
+        _adjustItem.PerformClick();
         return true;
     }
 

@@ -53,6 +53,14 @@ internal static class NativeMethods
     public const int WM_WINDOWPOSCHANGING = 0x0046;
     public const int WM_NCHITTEST = 0x0084;
     public const int WM_TIMER = 0x0113;
+
+    /// <summary>
+    /// 自定义消息起点（<c>WM_APP</c>）。用于**跨线程请求窗口做一件事**：
+    /// 卡片在浮动/嵌入之间切换必须发生在卡片自己那条线程上（改样式、启停 z 序管理器、
+    /// <c>SetWinEventHook</c> 都要消息泵），所以上层只投递一条消息，由窗口线程去执行。
+    /// </summary>
+    public const int WM_APP = 0x8000;
+
     public const int HTTRANSPARENT = -1;
 
     /// <summary>
@@ -273,6 +281,16 @@ internal static class NativeMethods
 
     [DllImport("user32.dll", EntryPoint = "GetWindowLongW", SetLastError = true)]
     public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+
+    /// <summary>
+    /// 改窗口样式。**运行时切换卡片模式靠它**（加/去 <c>WS_EX_TRANSPARENT</c> / <c>WS_EX_NOACTIVATE</c>）。
+    ///
+    /// ⚠️ 只调它是不够的：扩展样式改动必须紧跟一次带 <c>SWP_FRAMECHANGED</c> 的
+    /// <c>SetWindowPos</c>，否则会出现“<c>GetWindowLong</c> 已经变了、窗口行为没变”的假成功
+    /// —— 正是 M0 踩过的那类“只校验记账层”的坑。
+    /// </summary>
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongW", SetLastError = true)]
+    public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
 
     [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     public static extern ushort RegisterClassEx(ref WNDCLASSEX lpwcx);

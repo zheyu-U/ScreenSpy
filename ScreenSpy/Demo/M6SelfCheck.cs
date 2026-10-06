@@ -19,8 +19,11 @@ namespace ScreenSpy.Demo;
 ///  【数据】快照 → <see cref="CardModel"/> 的映射：**“今日”必须是今天一整天**（本次运行 + 库中基线）、
 ///         限额整块隐藏、行数上限、占比夹紧、时长格式化边界；
 ///  【窗口】真实创建 <see cref="CardWindow"/> 并验证：扩展样式含 LAYERED 但**不含** TRANSPARENT/NOACTIVATE
-///         （这正是 M6“可交互”与 M7“鼠标穿透”的分界）、<c>WM_NCHITTEST</c> 返回 <c>HTCAPTION</c>（可拖动）、
+///         （这正是“可交互形态”与嵌入桌面形态的分界）、<c>WM_NCHITTEST</c> 返回 <c>HTCAPTION</c>（可拖动）、
 ///         默认坐标在屏内、显示/隐藏往返、重绘持续推进、Dispose 后窗口真的销毁；
+///         **注意（M7 起）**：卡片默认形态已改为「嵌入桌面层」，M6 当年那个“可交互普通窗口”形态
+///         现在叫 **浮动（<see cref="WidgetMode.Floating"/>）** —— 本组因此显式以浮动形态创建卡片，
+///         否则断言会与默认形态冲突（这是口径变更，不是缺陷）。
 ///  【托盘】真实 <see cref="TrayIconHost"/> 的卡片开关：菜单文案与勾选**回读真实可见状态**、
 ///         点击真的回调到上层且可往返、不接线卡片时菜单形态与 M5b 完全一致；
 ///  【主界面】榜单末尾那条「不计入统计」行：时长用“今天一整天”口径（重启后**不许**掉）、
@@ -162,7 +165,7 @@ internal static class M6SelfCheck
 
     private static int WindowChecks()
     {
-        Console.WriteLine("---- B 卡片窗口（真实创建，客观判据）----");
+        Console.WriteLine("---- B 卡片窗口 · 浮动形态（真实创建，客观判据）----");
         int failed = 0;
 
         // 默认坐标必须在屏内：卡片“默认随产品启动显示”，默认位置跑到屏幕外就等于没显示。
@@ -175,11 +178,15 @@ internal static class M6SelfCheck
             CardWindow.DefaultY + CardWindow.DefaultHeight <= screenH);
 
         int modelCalls = 0;
-        using var card = new CardWindow(() =>
-        {
-            Interlocked.Increment(ref modelCalls);
-            return new CardModel { Title = "M6 自检", TotalTime = "0:07", CurrentApp = "自检" };
-        });
+        using var card = new CardWindow(
+            () =>
+            {
+                Interlocked.Increment(ref modelCalls);
+                return new CardModel { Title = "M6 自检", TotalTime = "0:07", CurrentApp = "自检" };
+            },
+            // M7 起卡片默认是「嵌入桌面层」；M6 那个可交互普通窗口形态现在叫「浮动」。
+            // 本组验的就是那个形态，因此显式指定，而不是依赖默认值。
+            WidgetMode.Floating);
 
         bool started = card.Start();
         failed += Check("启动成功且 Start() 返回时首帧已画完", started && card.Frames > 0);
@@ -196,7 +203,7 @@ internal static class M6SelfCheck
         int ex = NativeMethods.GetWindowLong(hwnd, NativeMethods.GWL_EXSTYLE);
         Console.WriteLine("   扩展样式：" + card.DescribeExStyle());
         failed += Check("含 WS_EX_LAYERED（逐像素 alpha 的前提）", (ex & NativeMethods.WS_EX_LAYERED) != 0);
-        failed += Check("**不含** WS_EX_TRANSPARENT（M6 与 M7 的分界：不穿透）",
+        failed += Check("**不含** WS_EX_TRANSPARENT（浮动形态不穿透：这正是它和嵌入形态的分界）",
             (ex & NativeMethods.WS_EX_TRANSPARENT) == 0);
         failed += Check("**不含** WS_EX_NOACTIVATE（可激活 = 可交互）",
             (ex & NativeMethods.WS_EX_NOACTIVATE) == 0);

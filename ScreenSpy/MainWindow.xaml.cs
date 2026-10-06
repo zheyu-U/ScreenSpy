@@ -32,6 +32,54 @@ public partial class MainWindow : Window
     /// </summary>
     internal string CloseHint { get; set; } = "关闭本窗口即退出（退出时会 flush 尾段）";
 
+    // ---------------------------------------------------------------- 卡片调整（M7）
+    //
+    // 四个回调都由 App 接线；**卡片是可选组件，所以都可能是 null**。
+    // 为 null 时对应按钮**隐藏** —— 没有卡片却给出“调整位置”，点了没反应比不显示更糟。
+    // 文案、可用性一律按**真实状态回读**（见 UpdatePositionControls），不按“我们以为点了会怎样”。
+
+    /// <summary>卡片当前是否处于「调整位置」这个**临时**会话（常态为嵌入、为了拖动临时切浮动）。</summary>
+    internal Func<bool>? IsAdjusting { get; set; }
+
+    /// <summary>进入/结束「调整位置」。</summary>
+    internal Action? ToggleAdjust { get; set; }
+
+    /// <summary>
+    /// 卡片**常态**是否是浮动窗口（用户选定的形态，而**不是**“调整中”那个临时状态）。
+    ///
+    /// 刻意读常态而不是当前形态：两者在“调整中”会不一致，而形态按钮说的永远是**常态**
+    /// （这正是它与「调整位置」的分工 —— 一个改常态，一个是临时插曲）。
+    /// </summary>
+    internal Func<bool>? IsFloating { get; set; }
+
+    /// <summary>切换卡片常态形态（嵌入 ⇄ 浮动）并持久化。</summary>
+    internal Action? ToggleCardMode { get; set; }
+
+    private void ModeButton_Click(object sender, RoutedEventArgs e)
+    {
+        try { ToggleCardMode?.Invoke(); }
+        catch { /* 界面动作失败不该影响统计 */ }
+        Refresh();
+    }
+
+    private void PositionButton_Click(object sender, RoutedEventArgs e)
+    {
+        try { ToggleAdjust?.Invoke(); }
+        catch { /* 界面动作失败不该影响统计 */ }
+        Refresh();
+    }
+
+    /// <summary>
+    /// 「调整位置」按钮文案（纯函数，便于自检客观断言）。
+    /// 显示的是**下一步动作**：当前在调整中 → 按钮写着“完成调整”。
+    /// </summary>
+    internal static string ComposePositionButtonText(bool adjusting)
+        => adjusting ? "完成调整" : "调整位置";
+
+    /// <summary>形态按钮文案（纯函数，同上）。同样显示**下一步动作**。</summary>
+    internal static string ComposeModeButtonText(bool floating)
+        => floating ? "切换为嵌入桌面层" : "切换为浮动窗口";
+
     /// <remarks>
     /// 构造函数刻意是 <c>internal</c>：参数 <see cref="ProductRuntime"/> 是程序集内部类型，
     /// 若构造函数为 public 会触发 CS0051（可访问性不一致）。
@@ -74,6 +122,7 @@ public partial class MainWindow : Window
         TodayText.Text = Format(status.TodayTotal);
         StateText.Text = DescribeState(status);
         NonAppText.Text = DescribeNonApp(status);
+        UpdatePositionControls();
 
         SessionText.Text = DescribeSession(status);
         SourceText.Text = DescribeSources(status);
@@ -129,6 +178,91 @@ public partial class MainWindow : Window
             $"快照 {status.SampledAt:HH:mm:ss} · 每秒刷新 · {CloseHint}";
 
         UpdateWarnings(status);
+    }
+
+    /// <summary>
+    /// 刷新「调整位置」「切换形态」两个按钮与提示。
+    ///
+    /// 三条都按**真实情况**回读，而不是按“我们以为点了会怎样”：
+    ///  * 按钮是否存在 —— 看回调是否接线（没卡片就不该有这个按钮，点了没反应比不显示更糟）；
+    ///  * 按钮文案 —— 看卡片**真实的**调整状态与常态形态，
+    ///    因此用托盘菜单进入调整、再用这里退出（或反之）都不会出现文案骗人的情况；
+    ///  * 按钮可用性 —— 两按钮**互斥**（见 <see cref="ComposePositionControlAvailability"/>）。
+    /// </summary>
+    private void UpdatePositionControls()
+    {
+        bool adjustWired = ToggleAdjust is not null;
+        bool modeWired = ToggleCardMode is not null;
+
+        if (!adjustWired && !modeWired)
+        {
+            PositionButton.Visibility = Visibility.Collapsed;
+            ModeButton.Visibility = Visibility.Collapsed;
+            PositionHintText.Text = string.Empty;
+            return;
+        }
+
+        bool adjusting = false;
+        bool floating = false;
+        try { adjusting = IsAdjusting?.Invoke() ?? false; } catch { /* 读形态失败按“未调整”显示 */ }
+        try { floating = IsFloating?.Invoke() ?? false; } catch { /* 读形态失败按“嵌入”显示 */ }
+
+        PositionButton.Visibility = adjustWired ? Visibility.Visible : Visibility.Collapsed;
+        ModeButton.Visibility = modeWired ? Visibility.Visible : Visibility.Collapsed;
+
+        (bool positionEnabled, bool modeEnabled) = ComposePositionControlAvailability(adjusting, floating);
+
+        PositionButton.Content = ComposePositionButtonText(adjusting);
+        PositionButton.IsEnabled = positionEnabled;
+        ModeButton.Content = ComposeModeButtonText(floating);
+        ModeButton.IsEnabled = modeEnabled;
+
+        PositionHintText.Text = BuildPositionHint(adjusting, floating);
+    }
+
+    /// <summary>
+    /// 两个按钮的**可用性**（纯函数，便于自检客观断言，不必去读真实 WPF 控件）。
+    ///
+    /// 规则只有两条，但各自堵住一个真实的坑：
+    ///
+    ///  1. **调整中 → 禁用形态按钮**。否则两个按钮会同时指向“嵌入”：调整中的形态本来就是
+    ///     临时的浮动，而那个按钮走的是“改常态”那条路（而不是「完成调整」的
+    ///     “先取坐标再上报”）—— 于是最后一次拖动可能还没写进库（最多约 1 秒的静默偏差），
+    ///     且当常态为嵌入时，在调整中点它还会把**临时**的浮动变成**永久**的常态。
+    ///  2. **常态为浮动 → 禁用调整按钮**。那时卡片随处可拖、每拍自动记位置，
+    ///     “调整”没有可做的事（点了没反应比禁用更糟）。
+    ///
+    /// 注：<paramref name="adjusting"/> 与 <paramref name="floating"/> 同时为真的是**不可能状态**
+    /// （调整中意味着常态非浮动），这里仍按“以调整中为准”给出确定答案，而不是抛异常 ——
+    /// 界面刷新路径不该因为一个读取竞争而崩掉。
+    /// </summary>
+    internal static (bool PositionEnabled, bool ModeEnabled) ComposePositionControlAvailability(
+        bool adjusting, bool floating)
+    {
+        bool modeEnabled = !adjusting;
+        bool positionEnabled = adjusting || !floating;
+        return (positionEnabled, modeEnabled);
+    }
+
+    /// <summary>
+    /// 卡片区域那行提示（纯函数，便于自检断言）。
+    ///
+    /// 三种状态各说各话，因为它们的“下一步能做什么”确实不同 ——
+    /// 说成同一句会让人以为嵌入形态下也能直接拖。
+    /// </summary>
+    internal static string BuildPositionHint(bool adjusting, bool floating)
+    {
+        if (adjusting)
+            return "调整中：卡片已变为**可拖动**的普通窗口（在最前）。用鼠标拖到想要的位置，" +
+                   "然后点「完成调整」——位置会被记住，下次启动仍在原处。" +
+                   "（此时「切换为浮动窗口 / 嵌入桌面层」按钮已禁用：请先完成调整，" +
+                   "否则最后一次拖动可能还没被存下来。）";
+
+        return floating
+            ? "卡片当前是**浮动窗口**：像普通窗口一样可拖动（拖完自动记住位置），也会被其它窗口盖住。" +
+              "（「调整位置」按钮已禁用 —— 无需临时调整：现在直接拖即可。）"
+            : "卡片当前**嵌入桌面层**：会被其它窗口盖住、鼠标穿透、不会抢焦点。" +
+              "要移动它点「调整位置」；想让它像普通窗口一样随时可拖，点「切换为浮动窗口」。";
     }
 
     private void UpdateWarnings(RuntimeStatus status)

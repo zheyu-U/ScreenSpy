@@ -26,7 +26,6 @@ internal sealed class NativeWindowHost : IDisposable
 
     private readonly string _className;
     private readonly string _title;
-    private readonly int _exStyle;
     private readonly int _style;
     private readonly int _width;
     private readonly int _height;
@@ -36,20 +35,42 @@ internal sealed class NativeWindowHost : IDisposable
     /// <summary>必须作为字段保持强引用，否则委托会在 RegisterClassEx 之后被 GC 回收。</summary>
     private readonly NativeMethods.WndProc _wndProc;
 
-    /// <summary>z 序自锁：外力（含系统）试图改变本窗口 z 序时，强制加上 SWP_NOZORDER。</summary>
-    private readonly bool _lockZOrder;
+    /// <summary>
+    /// 注册时真正使用的窗口类名：<c>基名#实例序号</c>。
+    ///
+    /// ⚠️ 为什么必须带序号（本轮修掉的一个隐患）：
+    /// 窗口类一旦注册，**类过程就与“那一个实例的委托”绑死了**（<c>lpfnWndProc</c> 是实例方法指针）。
+    /// 多个实例若复用同一个类名，第二个实例的所有消息都会走到**第一个实例**的 WndProc 上 ——
+    /// 于是第二个窗口的 <c>OnTick</c>、命中测试、z 序自锁全部静默失效（不报错，只是不工作）。
+    /// 单卡片的产品形态看不出来，但 M7「调整位置」会**反复创建 z 序探针**，必然踩到。
+    /// 每实例独占一个类名，从结构上消除这一类错误。
+    /// </summary>
+    private readonly string _registeredClass;
+
+    /// <summary>创建时的扩展样式（仅供诊断；运行期可被 <see cref="SetInteraction"/> 改写）。</summary>
+    private int _exStyle;
+
+    /// <summary>z 序自锁：外力（含系统）试图改变本窗口 z 序时，强制加上 SWP_NOZORDER。**可运行时切换**。</summary>
+    private volatile bool _lockZOrder;
 
     /// <summary>
     /// 交互模式（M6 可拖动卡片）：
     /// 命中测试整窗返回 <c>HTCAPTION</c>，于是按住任意位置都能拖动窗口（拖动由系统代劳）。
     /// 关闭时（默认，桌面卡片形态）命中测试返回 <c>HTTRANSPARENT</c>，即鼠标穿透。
+    /// **可运行时切换**（M7 的「调整位置」就是临时把它打开）。
     /// </summary>
-    private readonly bool _interactive;
+    private volatile bool _interactive;
+
+    /// <summary>窗口类名实例序号（进程内单调递增）。</summary>
+    private static int _classSerial;
 
     /// <summary>一次性放行标志：<see cref="MoveZOrder"/> 执行期间允许真正改变 z 序。</summary>
     private bool _allowZOrder;
 
     private bool _disposed;
+
+    /// <summary>窗口类**基名**（不含实例序号）。仅供诊断显示，不要拿它去匹配窗口。</summary>
+    public string ClassBaseName => _className;
 
     public IntPtr Handle { get; private set; }
 
@@ -57,6 +78,18 @@ internal sealed class NativeWindowHost : IDisposable
 
     /// <summary>定时器 tick 回调（在窗口线程上执行）。</summary>
     public Action? OnTick { get; set; }
+
+    /// <summary>
+    /// 自定义消息（<see cref="NativeMethods.WM_APP"/>）回调，在窗口线程上执行。
+    /// 跨线程请求“改样式 / 切模式”走这条路，而不是从别的线程直接动窗口。
+    /// </summary>
+    public Action? OnUserMessage { get; set; }
+
+    /// <summary>当前命中测试是否为“可拖动”（= 交互模式）。</summary>
+    public bool Interactive => _interactive;
+
+    /// <summary>当前是否开着 z 序自锁。</summary>
+    public bool ZOrderLocked => _lockZOrder;
 
     public bool Closed { get; private set; }
 
@@ -74,6 +107,8 @@ internal sealed class NativeWindowHost : IDisposable
         _lockZOrder = lockZOrder;
         _quitOnDestroy = quitOnDestroy;
         _interactive = interactive;
+        _registeredClass = _className + "#" + System.Threading.Interlocked.Increment(ref _classSerial)
+                                              .ToString(System.Globalization.CultureInfo.InvariantCulture);
         _wndProc = WndProcCore;
     }
 
@@ -82,7 +117,7 @@ internal sealed class NativeWindowHost : IDisposable
         EnsureClassRegistered();
 
         Handle = NativeMethods.CreateWindowEx(
-            _exStyle, _className, _title, _style,
+            _exStyle, _registeredClass, _title, _style,
             0, 0, _width, _height,
             IntPtr.Zero, IntPtr.Zero, NativeMethods.GetModuleHandle(null), IntPtr.Zero);
 
@@ -97,7 +132,7 @@ internal sealed class NativeWindowHost : IDisposable
     {
         lock (RegisterSync)
         {
-            if (RegisteredClasses.Contains(_className)) return;
+            if (RegisteredClasses.Contains(_registeredClass)) return;
 
             var wc = new NativeMethods.WNDCLASSEX
             {
@@ -109,7 +144,7 @@ internal sealed class NativeWindowHost : IDisposable
                 hInstance = NativeMethods.GetModuleHandle(null),
                 hCursor = NativeMethods.LoadCursor(IntPtr.Zero, NativeMethods.IDC_ARROW),
                 hbrBackground = IntPtr.Zero,
-                lpszClassName = _className,
+                lpszClassName = _registeredClass,
             };
 
             ushort atom = NativeMethods.RegisterClassEx(ref wc);
@@ -121,8 +156,46 @@ internal sealed class NativeWindowHost : IDisposable
                     throw new InvalidOperationException("RegisterClassEx 失败，错误码 " + err);
             }
 
-            RegisteredClasses.Add(_className);
+            RegisteredClasses.Add(_registeredClass);
         }
+    }
+
+    /// <summary>
+    /// 运行时切换交互形态（M7 的「嵌入 ⇄ 浮动」本质上就是这一件事）。
+    ///
+    /// 做三件事，配套不可省：
+    ///  1. 翻转命中测试（<c>HTCAPTION</c> 可拖 ⇄ <c>HTTRANSPARENT</c> 穿透）与 z 序自锁两个开关；
+    ///  2. 加/去 <c>WS_EX_TRANSPARENT</c> + <c>WS_EX_NOACTIVATE</c>（穿透 + 不抢焦点）；
+    ///  3. <c>SWP_FRAMECHANGED</c> 让系统重读样式 —— **少了这一步，样式位已经变了但窗口行为没变**
+    ///     （“API 全绿 ≠ 行为正确”，M0 的教训）。
+    ///
+    /// 刻意带 <c>SWP_NOZORDER</c>：z 序由 <see cref="MoveZOrder"/> 或外部的 z 序管理器单独负责，
+    /// 改样式不该顺带把窗口挪到别处；也因此不会与自锁互相打架。
+    /// </summary>
+    public void SetInteraction(bool interactive, bool lockZOrder, bool clickThrough)
+    {
+        _interactive = interactive;
+        _lockZOrder = lockZOrder;
+
+        if (Handle == IntPtr.Zero) return;
+
+        int ex = NativeMethods.GetWindowLong(Handle, NativeMethods.GWL_EXSTYLE);
+        const int mask = NativeMethods.WS_EX_TRANSPARENT | NativeMethods.WS_EX_NOACTIVATE;
+        ex = clickThrough ? (ex | mask) : (ex & ~mask);
+        _exStyle = ex;
+        NativeMethods.SetWindowLong(Handle, NativeMethods.GWL_EXSTYLE, ex);
+
+        NativeMethods.SetWindowPos(Handle, IntPtr.Zero, 0, 0, 0, 0,
+            NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOZORDER |
+            NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_FRAMECHANGED |
+            NativeMethods.SWP_NOOWNERZORDER | NativeMethods.SWP_NOSENDCHANGING);
+    }
+
+    /// <summary>投递一条自定义消息（<see cref="NativeMethods.WM_APP"/>），由窗口线程回调 <see cref="OnUserMessage"/>。</summary>
+    public void PostUserMessage()
+    {
+        if (Handle != IntPtr.Zero)
+            NativeMethods.PostMessage(Handle, NativeMethods.WM_APP, IntPtr.Zero, IntPtr.Zero);
     }
 
     public void StartTimers(int tickMs, int autoCloseSeconds)
@@ -214,6 +287,18 @@ internal sealed class NativeWindowHost : IDisposable
                 catch (Exception ex)
                 {
                     System.Diagnostics.Debug.WriteLine("[tick] " + ex);
+                }
+                return IntPtr.Zero;
+
+            case NativeMethods.WM_APP:
+                // 上层（别的线程）请求窗口线程做一件事（M7：切换嵌入/浮动模式）。
+                try
+                {
+                    OnUserMessage?.Invoke();
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine("[user-message] " + ex);
                 }
                 return IntPtr.Zero;
 

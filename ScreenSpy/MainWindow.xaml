@@ -25,6 +25,15 @@
 
             <TextBlock x:Name="NonAppText" Margin="0,6,0,0" FontSize="12" Foreground="#555" TextWrapping="Wrap" Text="—" />
 
+            <!-- 卡片形态与位置（M7）：形态 = 常态选择（持久）；调整位置 = 临时进入可拖形态。 -->
+            <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                <Button x:Name="PositionButton" Padding="12,4" Content="调整位置"
+                        Visibility="Collapsed" Click="PositionButton_Click" />
+                <Button x:Name="ModeButton" Margin="8,0,0,0" Padding="12,4" Content="切换为浮动窗口"
+                        Visibility="Collapsed" Click="ModeButton_Click" />
+            </StackPanel>
+            <TextBlock x:Name="PositionHintText" Margin="0,6,0,0" Foreground="#666" FontSize="11" TextWrapping="Wrap" />
+
             <TextBlock x:Name="SessionText" Margin="0,10,0,0" TextWrapping="Wrap" Foreground="#333" />
             <TextBlock x:Name="SourceText" Margin="0,4,0,0" TextWrapping="Wrap" Foreground="#333" />
 

@@ -3,9 +3,11 @@ using System.Collections.Generic;
 using System.IO;
 using System.Threading;
 using ScreenSpy.Collector;
+using ScreenSpy.Interop;
 using ScreenSpy.Logging;
 using ScreenSpy.Scheduling;
 using ScreenSpy.Storage;
+using ScreenSpy.Widget;
 
 namespace ScreenSpy.AppHost;
 
@@ -393,6 +395,34 @@ internal sealed class ProductRuntime : IDisposable
 
         return status;
     }
+
+    // ================================================================ 放置（M7：形态 + 坐标）
+
+    /// <summary>
+    /// 读卡片放置（形态 + 坐标）。存储不可用或从未设置过 → 返回默认（**嵌入** + 默认坐标）。
+    ///
+    /// 坐标会被夹回屏幕内：它是上一次会话存的，中间可能换过分辨率或拔过显示器，
+    /// 直接照搬会让卡片落在屏幕外 —— 那就是卡片消失了，且屏幕上没有任何提示。
+    /// </summary>
+    public WidgetPlacement LoadWidgetPlacement()
+    {
+        var fallback = new WidgetPlacement(WidgetMode.Embedded, 200, 700);
+        SqliteStore? store = _store is { IsEnabled: true } s ? s.Store : null;
+
+        WidgetPlacement placement = WidgetPlacementStore.Load(store, fallback);
+
+        int screenWidth = NativeMethods.GetSystemMetrics(NativeMethods.SM_CXSCREEN);
+        int screenHeight = NativeMethods.GetSystemMetrics(NativeMethods.SM_CYSCREEN);
+        return WidgetPlacementStore.ClampToScreen(placement, screenWidth, screenHeight);
+    }
+
+    /// <summary>保存卡片坐标（「调整位置」结束时调用）。存储不可用则静默忽略。</summary>
+    public void SaveWidgetPosition(int x, int y)
+        => WidgetPlacementStore.SavePosition(_store is { IsEnabled: true } s ? s.Store : null, x, y);
+
+    /// <summary>保存卡片形态。</summary>
+    public void SaveWidgetMode(WidgetMode mode)
+        => WidgetPlacementStore.SaveMode(_store is { IsEnabled: true } s ? s.Store : null, mode);
 
     // ================================================================ 释放
 

@@ -82,6 +82,14 @@ namespace ScreenSpy
                 return;
             }
 
+            // M7 自检入口（卡片双形态 + 位置持久化；控制台打印，跑完即退出）：
+            //   ScreenSpy.exe --m7-selfcheck
+            if (M7SelfCheck.IsRequested(e.Args))
+            {
+                Shutdown(M7SelfCheck.Run(e.Args));
+                return;
+            }
+
             // 桌面卡片演示入口（M0 结论落地用；**长期保留** —— 卡片接入产品（M6/M7）之前，
             // 它是唯一能观测桌面层行为的手段）：
             //   ScreenSpy.exe --demo-card [--seconds=8] [--win-d] [--no-marker]
@@ -124,12 +132,24 @@ namespace ScreenSpy
             var window = new MainWindow(_runtime);
             _window = window;
 
-            // ---- 卡片（M6）：默认随产品启动显示（决策③）。
+            // ---- 卡片（M6/M7）：默认随产品启动显示（决策③）。
+            // 形态与位置**从库中读取**：默认嵌入桌面层、默认坐标。
             // 卡片是**纯展示件**：创建/启动失败只留痕，绝不打断统计、托盘与主界面 ——
             // 所以这里连警告弹窗都不弹（为了一个装饰件去打断启动是不划算的）。
             if (startupOptions.CardEnabled)
             {
-                var card = new CardWindow(BuildCardModel);
+                ProductRuntime runtime = _runtime;
+                WidgetPlacement placement = runtime.LoadWidgetPlacement();
+
+                var card = new CardWindow(
+                    BuildCardModel,
+                    placement.Mode,
+                    placement.X,
+                    placement.Y,
+                    // 位置变化（「完成调整」或被拖动后）→ 立刻落库。
+                    // 回调可能来自卡片线程：SqliteStore 每次操作都是短连接，因此是安全的。
+                    onPositionChanged: (x, y) => runtime.SaveWidgetPosition(x, y));
+
                 if (card.Start())
                 {
                     _card = card;
@@ -141,6 +161,20 @@ namespace ScreenSpy
                 }
             }
 
+            // ---- 卡片位置/形态调整（M7）：主界面按钮与托盘菜单项是**同一个动作**。
+            // 只在真有卡片时接上 —— 没有卡片却给出“调整位置”，点了没反应比不显示更糟。
+            if (_card is not null)
+            {
+                window.IsAdjusting = () => _card?.IsAdjusting ?? false;
+                window.ToggleAdjust = ToggleCardAdjust;
+
+                // 形态按钮说的是**常态**（用户选定的形态），不是当前形态：
+                // 调整中当前形态虽是浮动，但常态仍是嵌入 —— 读当前形态会让两个按钮
+                // 同时指向“嵌入”，把两者的分工搅在一起。
+                window.IsFloating = () => _card?.RestingMode == WidgetMode.Floating;
+                window.ToggleCardMode = ToggleCardMode;
+            }
+
             // ---- 托盘（M5b）：有托盘之后，“关闭窗口”不再退出，而是隐藏到托盘。
             _tray = TrayIconHost.TryCreate(
                 snapshot: () => _runtime!.Snapshot(),
@@ -148,7 +182,11 @@ namespace ScreenSpy
                 openMainWindow: ShowMainWindow,
                 exit: RequestExit,
                 isCardVisible: () => _card?.IsVisible ?? false,
-                setCardVisible: SetCardVisible);
+                setCardVisible: SetCardVisible,
+                toggleAdjust: _card is null ? null : ToggleCardAdjust,
+                isAdjusting: () => _card?.IsAdjusting ?? false,
+                // 常态已是浮动时“调整位置”无事可做 → 托盘菜单项也**禁用**（而不是点了没反应）。
+                isAdjustAvailable: () => _card?.CanAdjust ?? false);
 
             if (_tray is null)
             {
@@ -234,6 +272,55 @@ namespace ScreenSpy
 
             if (visible) card.Show();
             else card.Hide();
+        }
+
+        /// <summary>
+        /// 「调整位置 / 完成调整」（M7）：主界面按钮与托盘菜单项是**同一个动作**。
+        ///
+        /// 这是**临时**进入浮动形态：结束时保存坐标并回到用户选定的常态形态。
+        /// </summary>
+        private void ToggleCardAdjust()
+        {
+            CardWindow? card = _card;
+            if (card is null) return;
+
+            if (card.IsAdjusting) card.EndAdjust();
+            else card.BeginAdjust();
+        }
+
+        /// <summary>
+        /// 切换**常态形态**（嵌入桌面层 ⇄ 浮动窗口）并存库（M7）。
+        ///
+        /// 与「调整位置」的分工：调整是临时的（用完回到这个常态），这里改的是常态本身。
+        ///
+        /// 两处保护：
+        ///  * **调整中先结束调整**。主界面那个按钮在调整中是**禁用**的，但这条路仍可能
+        ///    被别的入口调到（自检、将来新增的菜单项）。若不先结束调整，就会绕过
+        ///    「完成调整」的“取当前坐标再上报”，于是最后一次拖动可能还没写进库
+        ///    （最多约 1 秒的静默偏差）——正是本项目最忌的那类边界偏差。
+        ///    （自检断言：调整中切常态后，库里的坐标必须是**拖动后**的位置。）
+        ///  * **只有切换真的成功才写库** —— 否则库里的形态与屏幕上的形态会不一致，
+        ///    而下次启动就会照着库里的错值走。
+        ///
+        /// 读取用**常态**而不是当前形态：调整中当前形态是浮动的，若据此取反，就会把常态
+        /// 从嵌入直接推到浮动（用户只是结束了一次调整，却把常态改掉了）。
+        /// </summary>
+        private void ToggleCardMode()
+        {
+            CardWindow? card = _card;
+            if (card is null) return;
+
+            // 先结束调整（把当前坐标上报上去），再改常态。
+            if (card.IsAdjusting) card.EndAdjust();
+
+            WidgetMode next = card.RestingMode == WidgetMode.Floating
+                ? WidgetMode.Embedded
+                : WidgetMode.Floating;
+
+            if (!card.SwitchMode(next)) return;
+
+            card.SetRestingMode(next);
+            _runtime?.SaveWidgetMode(next);
         }
 
         protected override void OnExit(ExitEventArgs e)
