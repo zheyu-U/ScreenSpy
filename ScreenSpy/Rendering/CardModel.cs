@@ -40,12 +40,6 @@ internal sealed class CardModel
     /// </summary>
     public string NoWindowTime = "";
 
-    /// <summary>
-    /// 刷新计数（每秒 +1）。
-    /// **仅供演示入口与自检使用**：M6 起卡片不再把它画到界面上（M0 阶段的调试秒针已移除）。
-    /// </summary>
-    public int Tick;
-
     /// <summary>Top 软件排行：(名称, 时长文案, 占比 0.0 ~ 1.0)。</summary>
     public List<(string Name, string Time, double Ratio)> TopApps = new();
 }

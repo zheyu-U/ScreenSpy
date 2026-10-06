@@ -26,8 +26,9 @@ internal static class CardData
     /// 三处刻意的口径选择：
     ///  1. **“今日”用 <see cref="RuntimeStatus.TodayTotal"/>**（今天一整天 = 本次运行 + 库中基线），
     ///     而不是 <c>TodayActive</c>（本次运行）—— 否则重启后卡片会掉回 0:00 而榜单单仍有数据。
-    ///  2. <see cref="CardModel.LimitText"/> 留空 → 渲染器整块不画限额。真实限额属 M9，
-    ///     宁可不显示，也不显示一个并不存在的约束。
+    ///  2. <see cref="CardModel.LimitText"/> 直接透传快照（M9-2 起由限额引擎填）：
+    ///     为空 → 渲染器整块不画限额。**没有限额时不显示一个并不存在的约束**这一点仍然成立，
+    ///     只是“有没有限额”现在由真实规则决定。
     ///  3. 尚未采样到前台软件时显示“启动中”，而不是把占位文案“(尚未采样)”当成软件名。
     ///  4. **“不计入使用时长 / 无前台·未知”也显示在卡片上**（用 <c>DayFiltered/DayUnattributed</c>，
     ///     即今天一整天口径）—— 它们同样计入“今日”，标出来才不会被误以为漏算；为 0 时隐藏。
@@ -40,8 +41,8 @@ internal static class CardData
         {
             Title = "ScreenSpy",
             TotalTime = Format(status.TodayTotal),
-            LimitText = string.Empty,
-            LimitRatio = 0.0,
+            LimitText = status.LimitText ?? string.Empty,
+            LimitRatio = Math.Clamp(status.LimitRatio, 0.0, 1.0),
             CurrentApp = status.HasCurrentApp ? status.CurrentApp : "启动中",
             // 非软件活跃两行：都计入“今日真实活跃”，标出来免得被误以为漏掉。
             // 为 0 时给空串 → 渲染器整行不画。

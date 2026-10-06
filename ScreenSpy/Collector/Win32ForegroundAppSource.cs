@@ -20,14 +20,34 @@ internal sealed class Win32ForegroundAppSource : IForegroundAppSource
 {
     private readonly int _selfProcessId;
 
+    /// <summary>
+    /// M9-1 软件身份层（原始进程名 → 归一键）。
+    /// 声明为 <c>volatile</c> 引用：采样在心跳线程上读、用户在界面线程上整份替换，
+    /// 引用赋值本身是原子的，因此不需要锁。
+    /// 默认 <see cref="AppIdentity.Empty"/>（等价于 M9-1 之前的行为：不合并、不改名）。
+    /// </summary>
+    private volatile AppIdentity? _identity;
+
     private long _samples;
     private long _processLookupFailures;
     private long _selfSamples;
+    private long _uwpResolved;
+    private long _uwpUnresolved;
     private string? _fatalError;
 
     public Win32ForegroundAppSource(int? selfProcessId = null)
     {
         _selfProcessId = selfProcessId ?? Environment.ProcessId;
+    }
+
+    /// <summary>
+    /// 当前身份层。界面改动（合并 / 取消合并 / 分类）后由组合根**整份替换**，下一拍采样即生效 ——
+    /// 这就是"热更新"的全部实现：不可变对象 + 一次引用赋值，不需要重启、也不需要通知机制。
+    /// </summary>
+    public AppIdentity? Identity
+    {
+        get => _identity;
+        set => _identity = value;
     }
 
     /// <summary>采样总次数。</summary>
@@ -38,6 +58,12 @@ internal sealed class Win32ForegroundAppSource : IForegroundAppSource
 
     /// <summary>采样到“前台是本程序”的次数（正常情况下应≈0：卡片是 NOACTIVATE 的）。</summary>
     public long SelfSamples => Interlocked.Read(ref _selfSamples);
+
+    /// <summary>M11：前台是 UWP 宿主、且**成功识别出真实应用**的次数。</summary>
+    public long UwpResolvedSamples => Interlocked.Read(ref _uwpResolved);
+
+    /// <summary>M11：前台是 UWP 宿主、但**没能识别**（退回宿主 lump）的次数。</summary>
+    public long UwpUnresolvedSamples => Interlocked.Read(ref _uwpUnresolved);
 
     public bool IsAvailable => _fatalError is null;
 
@@ -63,7 +89,7 @@ internal sealed class Win32ForegroundAppSource : IForegroundAppSource
 
         // 没有任何窗口在前台（切换过程中、或前台被系统接管）：按“无前台”处理，不继承上一拍。
         if (hwnd == IntPtr.Zero)
-            return ForegroundAppRules.Create(IntPtr.Zero, 0, null, null, null, isSelfProcess: false);
+            return ForegroundAppRules.Create(IntPtr.Zero, 0, null, null, null, isSelfProcess: false, identity: _identity);
 
         string className = NativeMethods.ClassNameOf(hwnd);
         string title = NativeMethods.TitleOf(hwnd);
@@ -90,7 +116,7 @@ internal sealed class Win32ForegroundAppSource : IForegroundAppSource
         if (pid == _selfProcessId)
         {
             Interlocked.Increment(ref _selfSamples);
-            return ForegroundAppRules.Create(hwnd, pid, "ScreenSpy", className, title, isSelfProcess: true);
+            return ForegroundAppRules.Create(hwnd, pid, "ScreenSpy", className, title, isSelfProcess: true, identity: _identity);
         }
 
         string processName;
@@ -115,6 +141,20 @@ internal sealed class Win32ForegroundAppSource : IForegroundAppSource
         }
 
         LastError = null;
-        return ForegroundAppRules.Create(hwnd, pid, processName, className, title, isSelfProcess: false);
+
+        // M11（§5.5）：前台是 UWP 宿主时，枚举它的子窗口找出**真正承载应用**的那个，
+        // 用真实应用名取代宿主名。识别失败（None）时行为与 M11 之前完全一致 —— 不猜测。
+        if (ForegroundAppRules.IsUwpHost(processName))
+        {
+            UwpAppResolution uwp = UwpWindowResolver.Resolve(hwnd, pid);
+
+            if (uwp.Resolved) Interlocked.Increment(ref _uwpResolved);
+            else Interlocked.Increment(ref _uwpUnresolved);
+
+            return ForegroundAppRules.Create(hwnd, pid, processName, className, title, isSelfProcess: false,
+                                             identity: _identity, uwp: uwp);
+        }
+
+        return ForegroundAppRules.Create(hwnd, pid, processName, className, title, isSelfProcess: false, identity: _identity);
     }
 }

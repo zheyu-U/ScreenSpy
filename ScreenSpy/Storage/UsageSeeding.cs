@@ -23,9 +23,15 @@ internal static class UsageSeeding
     /// “不计入使用时长 / 无前台·未知”秒数（来自 <c>daily_activity</c>）。
     /// **必须一起灌入**：否则重启后“今日真实活跃”会漏掉这两部分而变小 ——
     /// 这正是本次修复的口径缺陷。
+    ///
+    /// <paramref name="identity"/>（M9-1）决定展示名与归一键：
+    ///  * 展示名优先取用户的设置（库里只存归一键与用户的覆盖名，不存系统友好名 —— 否则代码里的
+    ///    映射表升级后会被库里的旧名字压住）；
+    ///  * 归一键再解析一次是**幂等**的，且能兜住"先设了合并、而某天的行还是旧键"这类残留。
     /// </summary>
     public static int SeedTracker(AppUsageTracker tracker, IReadOnlyList<AppUsageRow> rows, DateOnly day,
-                                  long filteredSeconds = 0, long unattributedSeconds = 0)
+                                  long filteredSeconds = 0, long unattributedSeconds = 0,
+                                  AppIdentity? identity = null)
     {
         if (tracker is null) throw new ArgumentNullException(nameof(tracker));
 
@@ -36,9 +42,14 @@ internal static class UsageSeeding
             foreach (AppUsageRow row in rows)
             {
                 if (row.Seconds <= 0 || string.IsNullOrEmpty(row.AppName)) continue;
+
+                string key = identity?.Resolve(row.AppName) ?? row.AppName;
+                string display = identity?.DisplayNameOverride(key)
+                                 ?? ForegroundAppRules.NormalizeDisplayName(key);
+
                 seeds.Add(new AppUsageSeed(
-                    row.AppName,
-                    ForegroundAppRules.NormalizeDisplayName(row.AppName),
+                    key,
+                    display,
                     row.Seconds * 1000));
             }
         }

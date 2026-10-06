@@ -135,6 +135,19 @@ internal sealed class RuntimeStatus
     public long LogDropped { get; set; }
     public string? LogError { get; set; }
 
+    // ---------------------------------------------------------------- 限额（M9-2）
+
+    /// <summary>
+    /// 卡片上的限额文案（如 <c>"3:42 / 5:00"</c>；软件 / 分类限额会带上名字）。
+    /// **空串 = 隐藏整块限额区域** —— 没有限额时宁可不显示，也不显示一个并不存在的约束。
+    ///
+    /// 取的是**最接近上限**的那一条（卡片只有一根进度条）；口径与主界面、托盘一致。
+    /// </summary>
+    public string LimitText { get; set; } = string.Empty;
+
+    /// <summary>限额进度 0.0 ~ 1.0（仅当 <see cref="LimitText"/> 非空时有意义）。</summary>
+    public double LimitRatio { get; set; }
+
     // ---------------------------------------------------------------- 警告
 
     /// <summary>启动期与运行期的降级说明（正常为空）。</summary>

@@ -4,12 +4,10 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
-using ScreenSpy.Collector;
 using ScreenSpy.Desktop;
 using ScreenSpy.Diagnostics;
 using ScreenSpy.Interop;
 using ScreenSpy.Rendering;
-using ScreenSpy.Scheduling;
 using ScreenSpy.Widget;
 
 namespace ScreenSpy.Demo;
@@ -22,6 +20,10 @@ namespace ScreenSpy.Demo;
 /// 不便反复重放 Win+D 这类场景。
 ///
 /// 判定原则（沿用 M0 最重要的教训）：只认**截屏像素**，不认 API 返回值。
+///
+/// 数据源：**演示假数据**（<see cref="DemoCardData"/>）。真实数据由产品形态提供
+/// （<c>Widget/CardData.cs</c> 直接消费 <c>ProductRuntime.Snapshot</c>），本入口不承载真实统计，
+/// 因此原先的 <c>--m1</c> / <c>--m3</c> 两条"接真实数据"的路径已删除（2026-10-06）。
 /// </summary>
 internal static class DesktopCardDemo
 {
@@ -49,17 +51,15 @@ internal static class DesktopCardDemo
         int seconds = GetInt(args, "--seconds=", 8);
         int x = GetInt(args, "--x=", 200);
         int y = GetInt(args, "--y=", 700);
-        int settleMs = Math.Max(0, GetInt(args, "--settle-ms=", 1500));   // 等首帧/首拍稳定（供客观取证）
+        int settleMs = Math.Max(0, GetInt(args, "--settle-ms=", 1500));   // 等首帧稳定（供客观取证）
         bool marker = !HasFlag(args, "--no-marker");
         bool testWinD = HasFlag(args, "--win-d");
-        bool useM1 = HasFlag(args, "--m1");
-        bool useM3 = HasFlag(args, "--m3");   // M3：按软件统计（隐含启动 M1 调度器）
         string outDir = GetString(args, "--out=") ?? "artifacts";
         string name = GetString(args, "--name=") ?? "product-demo";
 
         Console.WriteLine("============ ScreenSpy 桌面卡片 · 产品工程演示（演示入口）============");
         Console.WriteLine($"卡片位置 ({x},{y})，尺寸 {CardWindow.DefaultWidth}×{CardWindow.DefaultHeight}（嵌入形态），运行 {seconds} 秒");
-        Console.WriteLine($"标记方块={marker}，Win+D 检测={testWinD}，M1 实时数据={useM1}，M3 按软件统计={useM3}");
+        Console.WriteLine($"标记方块={marker}，Win+D 检测={testWinD}，数据源=演示假数据");
         Console.WriteLine();
 
         EnableDpiAwareness();
@@ -70,44 +70,14 @@ internal static class DesktopCardDemo
         Console.WriteLine("----------------------");
         Console.WriteLine();
 
-        // --m1：把 M1 调度器采集到的**真实**活跃时长接到卡片上；
-        // --m3：再加上 M3 的按软件统计（隐含启动 M1 调度器）；都不给则用演示假数据。
-        ActivityScheduler? scheduler = null;
-        AppUsageBridge? usageBridge = null;
-        Win32ForegroundAppSource? appSource = null;
-
-        if (useM1 || useM3)
-        {
-            int idleThresholdSec = GetInt(args, "--idle-threshold=", ActivityRules.DefaultIdleThresholdSeconds);
-            scheduler = new ActivityScheduler(new Win32IdleClock(), TimeSpan.FromSeconds(idleThresholdSec));
-            scheduler.Start();
-            Console.WriteLine($"M1 调度器  ：已启动（空闲阈值 {idleThresholdSec}s，心跳 {scheduler.Heartbeat.TotalMilliseconds:F0}ms）");
-        }
-
+        // 数据源：演示假数据。真实数据由产品形态的 Widget/CardData.cs 消费 ProductRuntime.Snapshot 提供；
+        // 本入口只负责“渲染 → 逐像素上屏 → 客观判定”这条链路。
         Func<CardModel> modelFactory = () => DemoCardData.Build(0);
-
-        if (useM3)
-        {
-            appSource = new Win32ForegroundAppSource();
-            usageBridge = new AppUsageBridge(scheduler!, appSource);
-            Console.WriteLine($"M3 前台源  ：{(appSource.IsAvailable ? "可用" : "不可用")}（即时采样：{appSource.Sample()}）");
-            AppUsageBridge bridge = usageBridge;
-            ActivityScheduler sched = scheduler!;
-            modelFactory = () => AppLiveCardData.Build(0, bridge.Tracker, sched);
-        }
-        else if (useM1)
-        {
-            modelFactory = () => LiveCardData.Build(0, scheduler!);
-        }
 
         // 卡片：**嵌入形态**（M7 的默认形态，与产品一致）。
         // 取数函数在构造时传入 —— 卡片每秒拉一次，正是本项目“绑定”的做法。
         using var card = new CardWindow(modelFactory, WidgetMode.Embedded, x, y,
                                         debugMarker: marker ? CardWindow.DefaultDebugMarker : null);
-
-        // 原始活动日志（旁路，不改动归属逻辑）：默认开启、仅变化时记录；
-        // --no-raw-log 关闭，--log-dir=<path> 改目录。开发期默认落在 artifacts 下。
-        RawLogProbe? rawLog = usageBridge is null ? null : RawLogProbe.Create(usageBridge, args, "demo-rawlog");
 
         // CardWindow.Start() 自己拉起带消息循环的 STA 线程，并在首帧画完后才返回。
         if (!card.Start())
@@ -131,35 +101,7 @@ internal static class DesktopCardDemo
         Console.WriteLine($"显示桌面钩子  ：{(card.HookInstalled ? "已安装（SetWinEventHook）" : "未安装（仅定时器兜底）")}");
         Console.WriteLine();
 
-        Thread.Sleep(settleMs);   // 让定时器、首帧与首拍稳定
-
-        if (scheduler is not null)
-        {
-            Console.WriteLine($"M1 调度器快照：定时器回调 {scheduler.TimerFirings} 次，" +
-                              $"成功心跳 {scheduler.Sequence} 拍，" +
-                              $"最近空闲 {scheduler.LastIdle.TotalSeconds:F1}s，" +
-                              $"判定 {(scheduler.LastActive ? "活跃" : "挂机")}，" +
-                              $"今日 {scheduler.TodayActive.TotalSeconds:F1}s");
-            if (scheduler.LastError is { } err)
-                Console.WriteLine($"M1 调度器错误：{err}");
-
-            if (scheduler.TimerFirings > scheduler.Sequence)
-                Console.WriteLine($"!! 有 {scheduler.TimerFirings - scheduler.Sequence} 次心跳未生效（计时会偏低）。");
-
-            if (scheduler.Sequence == 0)
-            {
-                Console.WriteLine("M1 诊断：心跳从未成功，尝试在主线程同步采样一次…");
-                try
-                {
-                    Console.WriteLine($"  同步采样成功：{scheduler.Sample()}");
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"  同步采样抛异常：{ex}");
-                }
-            }
-            Console.WriteLine();
-        }
+        Thread.Sleep(settleMs);   // 让定时器与首帧稳定（供客观取证）
 
         string dir = Path.GetFullPath(outDir);
         Directory.CreateDirectory(dir);
@@ -189,30 +131,6 @@ internal static class DesktopCardDemo
             Console.WriteLine("!! 卡片线程未在 10 秒内退出。");
             rc |= 8;
         }
-
-        if (usageBridge is not null)
-        {
-            AppUsageTracker tr = usageBridge.Tracker;
-            Console.WriteLine($"M3 归属合计 ：{tr.Total.TotalSeconds:F1}s " +
-                              $"(已归因 {tr.AttributedTotal.TotalSeconds:F1}s / 已过滤 {tr.FilteredTotal.TotalSeconds:F1}s / 未归因 {tr.UnattributedTotal.TotalSeconds:F1}s)");
-            foreach (AppUsageEntry e in tr.Top(5))
-                Console.WriteLine($"   {e.DisplayName,-24} {e.Time.TotalSeconds,8:F1}s");
-            if (appSource is not null)
-                Console.WriteLine($"M3 采样     ：{appSource.Samples} 次（进程名取样失败 {appSource.ProcessLookupFailures}，自身前台 {appSource.SelfSamples}）");
-            if (scheduler is not null)
-            {
-                long diff = (long)Math.Round(tr.Total.TotalMilliseconds) - (long)Math.Round(scheduler.TodayActive.TotalMilliseconds);
-                Console.WriteLine($"M3 守恒差   ：{diff} ms（应为 0）");
-                if (Math.Abs(diff) > 1) rc |= 16;
-            }
-        }
-
-        // 先关闭最后一段状态并等待落盘，再打印证据（否则尾段还在内存里）。
-        rawLog?.Dispose();
-        if (rawLog is not null) Console.Write(rawLog.Report());
-
-        usageBridge?.Dispose();
-        scheduler?.Dispose();
 
         Console.WriteLine();
         Console.WriteLine(rc == 0

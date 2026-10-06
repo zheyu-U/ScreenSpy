@@ -45,6 +45,88 @@
 
             <TextBlock x:Name="ConservationText" Margin="0,6,0,0" Foreground="#666" FontSize="11" TextWrapping="Wrap" />
 
+            <!-- 软件与分类（M9-1）：这一节含**可交互控件**（下拉框、文本框），
+                 因此**按需重建**（进窗口时 / 点「刷新列表」/ 每次改动之后），
+                 绝不跟着上面那个每秒刷新一起重建 —— 那会把用户正打开的下拉框销毁掉。 -->
+            <TextBlock Text="软件与分类（M9-1）" Margin="0,18,0,0" Foreground="#666" />
+            <TextBlock Margin="0,4,0,0" Foreground="#888" FontSize="11" TextWrapping="Wrap"
+                       Text="把同一个软件的多个进程名合并成一个（并给软件指定分类）。分类口径：一个软件只属于一个分类。本节按需刷新，不随每秒状态刷新。" />
+
+            <WrapPanel Margin="0,8,0,0">
+                <Button x:Name="ReloadAppsButton" Padding="12,4" Content="刷新列表" Click="ReloadAppsButton_Click" />
+                <TextBox x:Name="NewCategoryBox" Width="110" Margin="10,0,0,0" VerticalContentAlignment="Center" />
+                <Button x:Name="NewCategoryButton" Margin="6,0,0,0" Padding="12,4" Content="新建分类" Click="NewCategoryButton_Click" />
+                <ComboBox x:Name="DeleteCategoryBox" Width="120" Margin="10,0,0,0" />
+                <Button x:Name="DeleteCategoryButton" Margin="6,0,0,0" Padding="12,4" Content="删除分类" Click="DeleteCategoryButton_Click" />
+            </WrapPanel>
+
+            <StackPanel x:Name="AppRowsPanel" Margin="0,8,0,0" />
+
+            <TextBlock Text="合并软件（把多个进程名并成一个）" Margin="0,10,0,0" Foreground="#666" />
+            <WrapPanel Margin="0,4,0,0">
+                <ComboBox x:Name="MergeFromBox" Width="200" />
+                <TextBlock Text="→" Margin="6,0,6,0" VerticalAlignment="Center" />
+                <ComboBox x:Name="MergeToBox" Width="200" />
+                <Button x:Name="MergeButton" Margin="8,0,0,0" Padding="12,4" Content="合并" Click="MergeButton_Click" />
+            </WrapPanel>
+            <TextBlock Margin="0,4,0,0" Foreground="#888" FontSize="11" TextWrapping="Wrap"
+                       Text="合并是把历史与今天的时长一并并入目标软件，因此不可拆分（原始活动日志仍保留原始进程名，可追溯）。要停止今后继续并入，用下面的「取消合并」。" />
+            <ComboBox x:Name="UnmergeBox" Width="280" Margin="0,6,0,0" />
+            <Button x:Name="UnmergeButton" Margin="0,6,0,0" Padding="12,4" Content="取消合并（对今后生效）" Click="UnmergeButton_Click" />
+            <TextBlock x:Name="IdentityHintText" Margin="0,6,0,0" Foreground="#666" FontSize="11" TextWrapping="Wrap" />
+
+            <!-- 限额（M9-2）：总 / 单软件（在软件行上）/ 分类。
+                 状态文字每秒刷新（纯文本、无交互）；下拉框与「已设限额」列表**按需重建**。 -->
+            <TextBlock Text="限额（M9-2）" Margin="0,18,0,0" Foreground="#666" />
+            <TextBlock Margin="0,4,0,0" Foreground="#888" FontSize="11" TextWrapping="Wrap"
+                       Text="达到设定时长时用托盘气泡提醒一次（只提醒，不阻止使用）。时长按「今天一整天」算，重启不会清零。" />
+            <TextBlock x:Name="LimitStatusText" Margin="0,6,0,0" TextWrapping="Wrap" FontFamily="Consolas" FontSize="12" Text="—" />
+
+            <WrapPanel Margin="0,8,0,0">
+                <Button x:Name="SetTotalLimitButton" Padding="12,4" Content="设置总限额…" Click="SetTotalLimitButton_Click" />
+                <ComboBox x:Name="CategoryLimitBox" Width="120" Margin="12,0,0,0" />
+                <Button x:Name="SetCategoryLimitButton" Margin="6,0,0,0" Padding="12,4" Content="设置分类限额…" Click="SetCategoryLimitButton_Click" />
+            </WrapPanel>
+
+            <TextBlock Margin="0,8,0,0" Foreground="#666" FontSize="11" TextWrapping="Wrap"
+                       Text="单软件限额在下方「软件与分类」每一行的「限额…」按钮上设置。" />
+
+            <TextBlock Text="提醒阈值（百分比，逗号分隔；默认 80,100）" Margin="0,10,0,0" Foreground="#666" />
+            <WrapPanel Margin="0,4,0,0">
+                <TextBox x:Name="ThresholdsBox" Width="120" VerticalContentAlignment="Center" />
+                <Button x:Name="SaveThresholdsButton" Margin="8,0,0,0" Padding="12,4" Content="保存阈值" Click="SaveThresholdsButton_Click" />
+            </WrapPanel>
+
+            <TextBlock Text="已设限额（可删除）" Margin="0,10,0,0" Foreground="#666" />
+            <StackPanel x:Name="LimitRowsPanel" Margin="0,4,0,0" />
+
+            <TextBlock x:Name="LimitHintText" Margin="0,6,0,0" Foreground="#666" FontSize="11" TextWrapping="Wrap" />
+
+            <!-- 近 7 天柱状图（M10）：柱子 = 当天「真实活跃」总量（与上方大字同口径，锁屏不计入）。
+                 数据**只读库**（用户决策），因此最多滞后约 15 秒；图表每 15 秒自动刷新。
+                 维度/目标下拉框**按需重建**（不跟着每秒刷新走），否则会把用户正打开的列表销毁。 -->
+            <TextBlock Text="近 7 天（M10）" Margin="0,18,0,0" Foreground="#666" />
+            <TextBlock Margin="0,4,0,0" Foreground="#888" FontSize="11" TextWrapping="Wrap"
+                       Text="柱子 = 当天「真实活跃」总量（与上方大字同一口径；锁屏/睡眠完全不计入）。空槽 = 那天没有记录。数据来自已落库的记录，因此最多滞后约 15 秒。" />
+            <WrapPanel Margin="0,8,0,0">
+                <TextBlock Text="看：" VerticalAlignment="Center" Foreground="#666" />
+                <ComboBox x:Name="ChartDimensionBox" Width="120" Margin="6,0,0,0"
+                          SelectionChanged="ChartDimensionBox_SelectionChanged" />
+                <ComboBox x:Name="ChartTargetBox" Width="220" Margin="8,0,0,0"
+                          SelectionChanged="ChartTargetBox_SelectionChanged" />
+                <Button x:Name="ReloadChartButton" Margin="8,0,0,0" Padding="12,4"
+                        Content="刷新图表" Click="ReloadChartButton_Click" />
+            </WrapPanel>
+            <TextBlock x:Name="ChartTitleText" Margin="0,8,0,0" FontSize="13" FontWeight="Bold" />
+            <Border x:Name="ChartHost" Margin="0,6,0,0" />
+            <TextBlock x:Name="ChartHintText" Margin="0,6,0,0" Foreground="#666" FontSize="11" TextWrapping="Wrap" />
+
+            <TextBlock Text="开机自启（M12）" Margin="0,18,0,0" Foreground="#666" />
+            <CheckBox x:Name="AutoStartCheck" Margin="0,6,0,0" Content="登录时自动启动 ScreenSpy"
+                      Visibility="Collapsed" Click="AutoStartCheck_Click" />
+            <TextBlock x:Name="AutoStartHintText" Margin="0,4,0,0" Foreground="#666" FontSize="11"
+                       TextWrapping="Wrap" />
+
             <TextBlock Text="聚合落库（M4）" Margin="0,18,0,0" Foreground="#666" />
             <TextBlock x:Name="StoreText" Margin="0,4,0,0" TextWrapping="Wrap" FontFamily="Consolas" FontSize="12" />
 

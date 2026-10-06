@@ -391,6 +391,107 @@ internal sealed class AppUsageTracker
         }
     }
 
+    /// <summary>
+    /// 取**全部**软件条目（不只是 Top N），排序与 <see cref="Top"/> 一致。
+    /// 界面「软件与分类」一节需要看到所有软件（用户可能想给一个很小的软件设分类或合并它），
+    /// 而不是只看前 5 名。
+    /// </summary>
+    public IReadOnlyList<AppUsageEntry> All()
+    {
+        lock (_gate)
+        {
+            var list = new List<AppUsageEntry>(_buckets.Count);
+            long total = _attributedMs + _seededMs;
+
+            foreach (KeyValuePair<string, Bucket> kv in _buckets)
+            {
+                long ms = kv.Value.TotalMilliseconds;
+                if (ms <= 0) continue;
+                double share = total > 0 ? (double)ms / total : 0.0;
+                list.Add(new AppUsageEntry(kv.Key, kv.Value.DisplayName, ms, share));
+            }
+
+            list.Sort(static (a, b) =>
+            {
+                int byMs = b.Milliseconds.CompareTo(a.Milliseconds);
+                return byMs != 0 ? byMs : string.CompareOrdinal(a.DisplayName, b.DisplayName);
+            });
+
+            return list;
+        }
+    }
+
+    /// <summary>
+    /// **把 fromKey 的累计并入 toKey**（合并软件时的内存侧动作）。
+    /// 与库内的行重写、待写增量的重键是**同一个动作的三个部分**，必须一起做 ——
+    /// 少做一处，今天就会同时出现"合并前"与"合并后"两条账（数字看着对不上，且不报错）。
+    ///
+    /// 毫秒与基线**都要搬**：只搬本次运行的毫秒，会让"今天一整天"丢掉合并前的那部分历史。
+    /// 返回是否确实发生了合并。
+    /// </summary>
+    public bool MergeKeys(string fromKey, string toKey, string? displayName = null)
+    {
+        string from = fromKey ?? string.Empty;
+        string to = toKey ?? string.Empty;
+        if (from.Length == 0 || to.Length == 0 || string.Equals(from, to, StringComparison.Ordinal)) return false;
+
+        lock (_gate)
+        {
+            if (!_buckets.TryGetValue(from, out Bucket? source)) return false;
+
+            if (!_buckets.TryGetValue(to, out Bucket? target))
+            {
+                target = new Bucket();
+                _buckets[to] = target;
+            }
+
+            target.Milliseconds += source.Milliseconds;
+            target.SeedMilliseconds += source.SeedMilliseconds;
+            if (!string.IsNullOrEmpty(displayName)) target.DisplayName = displayName!;
+            else if (string.IsNullOrEmpty(target.DisplayName)) target.DisplayName = source.DisplayName;
+
+            _buckets.Remove(from);
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// 把某个软件的**展示名**改成别的（M9-1b「自定义名称」的内存侧动作）。
+    ///
+    /// 为什么必须动**两个**地方：榜单行（<c>_buckets</c>）与"当前软件"（<c>_last</c>）。
+    /// 只改前者的话，卡片上"正在使用 …"仍是旧名，直到那个软件**下一次成为前台**
+    /// —— 可能是几分钟后，表现为"改了名但没完全生效"（不报错，只是没生效）。
+    ///
+    /// 与 <see cref="MergeKeys"/> 的关键差别：这里**不碰任何毫秒数**，也不动键 ——
+    /// 改名是纯展示层动作，统计口径一个字都不变。
+    /// 返回是否确实改到了什么（键不存在且不是当前软件时为 false）。
+    /// </summary>
+    public bool SetDisplayName(string mergeKey, string displayName)
+    {
+        string key = mergeKey ?? string.Empty;
+        string name = (displayName ?? string.Empty).Trim();
+        if (key.Length == 0 || name.Length == 0) return false;
+
+        lock (_gate)
+        {
+            bool changed = false;
+
+            if (_buckets.TryGetValue(key, out Bucket? bucket))
+            {
+                bucket.DisplayName = name;
+                changed = true;
+            }
+
+            if (_hasLast && string.Equals(_last.MergeKey, key, StringComparison.Ordinal))
+            {
+                _last = _last.WithDisplayName(name);
+                changed = true;
+            }
+
+            return changed;
+        }
+    }
+
     /// <summary>取某个合并键的累计时长（毫秒）；不存在返回 0。自检用。</summary>
     public long MillisecondsOf(string mergeKey)
     {

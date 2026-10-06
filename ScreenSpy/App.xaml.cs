@@ -1,7 +1,10 @@
-﻿using System.ComponentModel;
+﻿using System;
+using System.ComponentModel;
 using System.Windows;
 using ScreenSpy.AppHost;
 using ScreenSpy.Demo;
+using ScreenSpy.Diagnostics;
+using ScreenSpy.Limits;
 using ScreenSpy.Rendering;
 using ScreenSpy.Widget;
 
@@ -90,6 +93,46 @@ namespace ScreenSpy
                 return;
             }
 
+            // M9-1 自检入口（软件身份层：合并 + 分类；控制台打印 + 日志文件兜底，跑完即退出）：
+            //   ScreenSpy.exe --m9-selfcheck [--dir=<目录>] [--log=<文件>]
+            if (M9SelfCheck.IsRequested(e.Args))
+            {
+                Shutdown(M9SelfCheck.Run(e.Args));
+                return;
+            }
+
+            // M10 自检入口（近 7 天柱状图：口径 / 布局 / 范围查询 / 组合根与降级）：
+            //   ScreenSpy.exe --m10-selfcheck [--dir=<目录>] [--log=<文件>]
+            if (M10SelfCheck.IsRequested(e.Args))
+            {
+                Shutdown(M10SelfCheck.Run(e.Args));
+                return;
+            }
+
+            // M11 取证工具（UWP 窗口实地勘察）：确认"应用本体到底在哪里"。
+            //   ScreenSpy.exe --diag-uwp
+            if (UwpWindowDiagnostics.IsRequested(e.Args))
+            {
+                Shutdown(UwpWindowDiagnostics.Run());
+                return;
+            }
+
+            // M11 自检入口（UWP 真实名修正：解析规则 / 键→名一致性 / 真实 Win32）：
+            //   ScreenSpy.exe --m11-selfcheck [--dir=<目录>] [--log=<文件>]
+            if (M11SelfCheck.IsRequested(e.Args))
+            {
+                Shutdown(M11SelfCheck.Run(e.Args));
+                return;
+            }
+
+            // M12 自检入口（开机自启：纯逻辑 / 注册表真实往返 / 组合根与接线）：
+            //   ScreenSpy.exe --m12-selfcheck [--dir=<目录>] [--log=<文件>]
+            if (M12SelfCheck.IsRequested(e.Args))
+            {
+                Shutdown(M12SelfCheck.Run(e.Args));
+                return;
+            }
+
             // 桌面卡片演示入口（M0 结论落地用；**长期保留** —— 卡片接入产品（M6/M7）之前，
             // 它是唯一能观测桌面层行为的手段）：
             //   ScreenSpy.exe --demo-card [--seconds=8] [--win-d] [--no-marker]
@@ -127,6 +170,9 @@ namespace ScreenSpy
             }
 
             _runtime = start.Runtime;
+
+            // 限额提醒（M9-2）：引擎在心跳线程上判定，这里负责把它送到托盘气泡。
+            _runtime.LimitNotified += OnLimitNotified;
 
             // 不使用 StartupUri，改为显式创建主窗口（WPF 会自动把它设为 Application.MainWindow）。
             var window = new MainWindow(_runtime);
@@ -186,7 +232,9 @@ namespace ScreenSpy
                 toggleAdjust: _card is null ? null : ToggleCardAdjust,
                 isAdjusting: () => _card?.IsAdjusting ?? false,
                 // 常态已是浮动时“调整位置”无事可做 → 托盘菜单项也**禁用**（而不是点了没反应）。
-                isAdjustAvailable: () => _card?.CanAdjust ?? false);
+                isAdjustAvailable: () => _card?.CanAdjust ?? false,
+                // 「设置…」（M9-2）：限额与「软件与分类」都在主界面里，因此它就是打开主界面。
+                openSettings: ShowMainWindow);
 
             if (_tray is null)
             {
@@ -208,7 +256,29 @@ namespace ScreenSpy
             // 正好就是我们要的降级行为。
             window.Closing += OnMainWindowClosing;
 
-            window.Show();
+            // ---- 开机自启（M12）：**注册表是唯一事实来源**，界面每次回读。
+            // 不往 settings 表里再存一份"期望状态"：两份状态一旦不一致（用户在任务管理器删掉、
+            // 被策略拦下、被别的工具覆盖），界面就会显示"已启用"而实际没有。
+            var autoStart = new AutoStartRegistration();
+            window.QueryAutoStart = autoStart.Query;
+            window.SetAutoStart = enabled =>
+            {
+                if (enabled) autoStart.Enable();
+                else autoStart.Disable();
+            };
+
+            // 自启拉起时**只进托盘、不显示主界面**（用户决策）——
+            // 登录时弹一个窗口打断用户，不是"常驻小工具"该有的样子。
+            // 例外：**托盘不可用时必须显示窗口**，否则没有任何入口能呼出界面，
+            // 程序会变成"看不见也关不掉"（M5b 降级契约在自启场景下的延续）。
+            if (AutoStartRules.ShouldShowMainWindow(startupOptions.AutoRun, _tray is not null))
+            {
+                window.Show();
+            }
+            else
+            {
+                System.Diagnostics.Debug.WriteLine("[startup] --autorun：只进托盘，不显示主界面。");
+            }
         }
 
         /// <summary>关闭主窗口：托盘可用时隐藏（不退出），否则放行（退出）。</summary>
@@ -240,6 +310,32 @@ namespace ScreenSpy
         {
             _exiting = true;
             Shutdown(0);
+        }
+
+        /// <summary>
+        /// 限额提醒（M9-2）。回调在**心跳线程**上，因此必须 marshal 到 UI 线程再弹气泡
+        /// （<c>NotifyIcon</c> 属于 UI 线程）。
+        ///
+        /// 托盘不可用（降级运行）时只留一行调试痕迹 —— 通知是可选能力，不该为了它弹错误框
+        /// 去打断用户。
+        /// </summary>
+        private void OnLimitNotified(LimitNotification note)
+        {
+            try
+            {
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    TrayIconHost? tray = _tray;
+                    if (tray is null)
+                    {
+                        System.Diagnostics.Debug.WriteLine("[limit] " + note.Message);
+                        return;
+                    }
+
+                    tray.ShowNotification(note.Title, note.Message);
+                }));
+            }
+            catch { /* 通知失败不影响统计 */ }
         }
 
         /// <summary>
@@ -336,6 +432,7 @@ namespace ScreenSpy
             _tray = null;
 
             // 退出时释放运行时：停心跳 → 刷日志尾段与落库尾段。漏掉这一步每次退出都会丢尾段。
+            try { if (_runtime is not null) _runtime.LimitNotified -= OnLimitNotified; } catch { /* 忽略 */ }
             try { _runtime?.Dispose(); } catch { /* 退出路径不再抛异常 */ }
             _runtime = null;
 

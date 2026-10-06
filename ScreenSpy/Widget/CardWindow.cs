@@ -111,7 +111,6 @@ internal sealed class CardWindow : IDisposable
     private DesktopZOrderManager? _zorder;
     private volatile bool _stopRequested;
     private volatile string? _error;
-    private int _tick;
     private int _frames;
     private int _sinceRedrawMs;
     private int _tickInterval;
@@ -201,9 +200,6 @@ internal sealed class CardWindow : IDisposable
 
     /// <summary>已绘制的帧数（自检用：&gt; 0 表示“渲染 → 逐像素上屏”这条链路真的跑起来了）。</summary>
     public int Frames => Volatile.Read(ref _frames);
-
-    /// <summary>刷新计数（每秒 +1）。</summary>
-    public int Ticks => Volatile.Read(ref _tick);
 
     /// <summary>启动或运行期的失败原因（正常为 null）。卡片是纯展示件，失败不得影响统计。</summary>
     public string? LastError => _error;
@@ -559,7 +555,6 @@ internal sealed class CardWindow : IDisposable
         if (_sinceRedrawMs < RedrawMs) return;
 
         _sinceRedrawMs = 0;
-        _tick++;
         Draw();
     }
 
@@ -579,7 +574,6 @@ internal sealed class CardWindow : IDisposable
             model = new CardModel { CurrentApp = "取数失败：" + ex.GetType().Name };
         }
 
-        model.Tick = _tick;
         _renderer.Draw(host.Surface.Graphics, host.Surface.Size, model);
 
         if (_debugMarker is { } marker)

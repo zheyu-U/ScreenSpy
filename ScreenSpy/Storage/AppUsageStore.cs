@@ -437,6 +437,53 @@ internal sealed class AppUsageStore : IDisposable
         }
     }
 
+    /// <summary>
+    /// 合并软件时把**待写增量**重键（<paramref name="fromKey"/> 的各天 → <paramref name="toKey"/>）。
+    ///
+    /// 这是"合并"这个动作的第二个部分（第一部分是内存榜单 <c>AppUsageTracker.MergeKeys</c>，
+    /// 第三部分是库内历史行 <c>SqliteStore.MergeAppKey</c>）。
+    /// 三处必须一起做：少做这一处，那部分尚未落库的秒数会在下一轮 flush 时又写成**原始键**，
+    /// 于是合并"看起来生效了"，但今天仍会多出一行 —— 不报错，只是数字对不上。
+    /// </summary>
+    public void MergePendingKeys(string fromKey, string toKey, string? displayName = null)
+    {
+        string from = fromKey ?? string.Empty;
+        string to = toKey ?? string.Empty;
+        if (from.Length == 0 || to.Length == 0 || string.Equals(from, to, StringComparison.Ordinal)) return;
+
+        lock (_gate)
+        {
+            var moved = new List<(DateOnly Day, string Key)>();
+            foreach (KeyValuePair<(DateOnly Day, string Key), Pending> kv in _pending)
+            {
+                if (string.Equals(kv.Key.Key, from, StringComparison.Ordinal)) moved.Add(kv.Key);
+            }
+
+            foreach ((DateOnly Day, string Key) key in moved)
+            {
+                Pending source = _pending[key];
+                var targetKey = (key.Day, to);
+
+                if (!_pending.TryGetValue(targetKey, out Pending? target))
+                {
+                    target = new Pending();
+                    _pending[targetKey] = target;
+                }
+
+                target.Milliseconds += source.Milliseconds;
+                target.Received += source.Received;
+
+                if (!string.IsNullOrEmpty(displayName)) target.DisplayName = displayName!;
+                else if (string.IsNullOrEmpty(target.DisplayName)) target.DisplayName = source.DisplayName;
+
+                _pending.Remove(key);
+            }
+
+            // “上一次见到的键”也要改指：否则下一拍会被误判成“切换了软件”而触发一次多余的强制 flush。
+            if (_lastKey is not null && string.Equals(_lastKey, from, StringComparison.Ordinal)) _lastKey = to;
+        }
+    }
+
     private void RecordError(Exception ex)
     {
         Interlocked.Increment(ref _failures);

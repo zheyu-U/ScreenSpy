@@ -59,6 +59,7 @@ internal readonly struct ForegroundAppSample
                                ForegroundAppKind kind,
                                string displayName,
                                string mergeKey,
+                               string rawKey,
                                string? diagnostic = null)
     {
         Hwnd = hwnd;
@@ -71,6 +72,7 @@ internal readonly struct ForegroundAppSample
         Kind = kind;
         DisplayName = displayName ?? ForegroundAppRules.DisplayUnknown;
         MergeKey = mergeKey ?? string.Empty;
+        RawKey = rawKey ?? string.Empty;
         Diagnostic = diagnostic;
     }
 
@@ -95,11 +97,33 @@ internal readonly struct ForegroundAppSample
     /// <summary>展示名（规范化后的“软件名”）。</summary>
     public string DisplayName { get; }
 
-    /// <summary>合并键（同名合并：按进程名，忽略大小写；§5.4 要求）。</summary>
+    /// <summary>
+    /// 合并键（同名合并：按进程名，忽略大小写；§5.4 要求）。
+    /// M9-1 起这里是**归一键**：若用户把某个进程名合并到了别的软件，它给出的是合并后的键。
+    /// 原始进程名见 <see cref="RawKey"/>（原始活动日志仍记原始进程名，因此合并后依然可追溯）。
+    /// </summary>
     public string MergeKey { get; }
+
+    /// <summary>
+    /// **原始**合并键（进程名小写，未经 M9-1 的身份层解析）。等于 <see cref="MergeKey"/> 表示"未合并"。
+    /// 保留它是为了：① 界面能说明"这个软件由哪些进程名合并而来"；② 自检能断言解析确实发生了。
+    /// </summary>
+    public string RawKey { get; }
 
     /// <summary>采样过程中遇到的问题（正常为 null）。</summary>
     public string? Diagnostic { get; }
+
+    /// <summary>
+    /// 复制一份、只替换展示名（M9-1b）。
+    ///
+    /// 用途：用户改了软件名之后，要把**"当前软件"**（卡片上那一行）也立刻换成新名 ——
+    /// 否则它会一直显示旧名、直到那个软件下一次成为前台（可能几分钟后），
+    /// 表现为"改了名但没完全生效"（不报错）。
+    /// 除展示名之外的一切（分类、键、pid、句柄）都原样保留：改名是**纯展示层**动作。
+    /// </summary>
+    public ForegroundAppSample WithDisplayName(string? displayName)
+        => new(Hwnd, ProcessId, ProcessName, ClassName, Title, Kind,
+               displayName ?? string.Empty, MergeKey, RawKey, Diagnostic);
 
     /// <summary>是否应计入“按软件统计”。</summary>
     public bool CountsAsApp => Kind is ForegroundAppKind.App or ForegroundAppKind.UwpHost;
@@ -119,5 +143,6 @@ internal readonly struct ForegroundAppSample
     public override string ToString() =>
         $"{ForegroundAppRules.Describe(Kind)} '{DisplayName}'" +
         (ProcessName.Length > 0 ? $" (pid={ProcessId}, proc={ProcessName}, class={ClassName})" : "") +
+        (string.Equals(RawKey, MergeKey, StringComparison.Ordinal) ? "" : $" [merge {RawKey}→{MergeKey}]") +
         (Diagnostic is null ? "" : $" [{Diagnostic}]");
 }

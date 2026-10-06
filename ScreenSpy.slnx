@@ -13,10 +13,22 @@
     <File Path="docs/M5b-托盘与关闭不退出.md" />
     <File Path="docs/M6-验证.md" />
     <File Path="docs/M7-验证.md" />
+    <File Path="docs/M9-1-验证.md" />
+    <File Path="docs/M9-2-验证.md" />
+    <File Path="docs/M10-验证.md" />
+    <File Path="docs/M11-验证.md" />
+    <File Path="docs/M12-验证.md" />
+    <File Path="docs/UI-重写思路.md" />
     <File Path="docs/对话流程记录.md" />
     <File Path="docs/对话纪要.md" />
     <File Path="docs/开发文档.md" />
+    <File Path="docs/开发流程与注意事项.md" />
+    <File Path="docs/未来计划.md" />
+    <File Path="docs/核心接口说明.md" />
     <File Path="docs/阶段总结.md" />
+  </Folder>
+  <Folder Name="/root/">
+    <File Path="README.md" />
   </Folder>
   <Project Path="ScreenSpy/ScreenSpy.csproj" />
 </Solution>

@@ -4,8 +4,12 @@ using ScreenSpy.Rendering;
 namespace ScreenSpy.Demo;
 
 /// <summary>
-/// 演示用假数据。真实数据要等 M1（计时调度器）/ M4（存储）完成后才存在，
-/// 这里只为打通“渲染 → 逐像素上屏 → 客观判定”的链路。
+/// 演示用假数据（**固定内容**，与真实统计无关）：只为打通并**随时复现**
+/// “渲染 → 逐像素上屏 → 客观判定”这条链路（截屏像素判定的基准）。
+///
+/// 真实数据不经过这里：产品形态由 <c>Widget/CardData.cs</c> 消费
+/// <c>ProductRuntime.Snapshot</c> 取数。本入口因此刻意保持**确定性**——
+/// 画面不变，像素判定才有意义。
 /// </summary>
 internal static class DemoCardData
 {

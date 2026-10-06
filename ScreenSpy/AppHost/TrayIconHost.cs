@@ -16,12 +16,15 @@ namespace ScreenSpy.AppHost;
 ///  * **菜单动作绝不把异常抛进消息循环** —— 统一走 <c>Safe</c>。
 ///  * 图标由 <see cref="TrayIconFactory"/> 程序化生成，并按「统计中 / 已暂停」两态切换。
 ///
-/// 菜单结构（M5b 建立，M6 加卡片项，M7 接上调整项）：
-/// 打开主界面 / 暂停统计 / [显示卡片·隐藏卡片] / [调整组件位置·完成调整] / 设置（M9，禁用占位）/ 退出。
-/// 方括号两项**只在接线了对应回调时出现** —— 不带卡片的宿主（例如 M5b 自检）看到的菜单
-/// 与 M5b 当时完全一致，形态不被悄悄改动。未接线的调整入口保留**禁用占位**：
+/// 菜单结构（M5b 建立，M6 加卡片项，M7 接上调整项，M9-2 接上设置项）：
+/// 打开主界面 / 暂停统计 / [显示卡片·隐藏卡片] / [调整组件位置·完成调整] / [设置…] / 退出。
+/// 方括号三项**只在接线了对应回调时出现** —— 不带卡片的宿主（例如 M5b 自检）看到的菜单
+/// 与 M5b 当时完全一致，形态不被悄悄改动。未接线的入口保留**禁用占位**：
 /// 点了没反应比“看起来能点”诚实。
 /// 调整项在“常态已是浮动”时也**禁用**（那时没有可调整的东西）—— 口径与主界面那个按钮一致。
+///
+/// 设置入口（M9-2）打开的是**主界面**：限额与「软件与分类」都在那里，
+/// 而不是另做一个只装两三个控件的设置窗口（那会让“设置在哪”变成两个地方）。
 ///
 /// 线程：必须在 WPF 的 UI 线程（STA、有消息循环）上创建与释放。
 /// </summary>
@@ -35,6 +38,7 @@ internal sealed class TrayIconHost : IDisposable
     private readonly Forms.ToolStripMenuItem _pauseItem;
     private readonly Forms.ToolStripMenuItem? _cardItem;
     private readonly Forms.ToolStripMenuItem? _adjustItem;
+    private readonly Forms.ToolStripMenuItem? _settingsItem;
     private readonly Forms.ToolStripMenuItem _exitItem;
     private readonly DispatcherTimer _timer;
     private readonly Func<RuntimeStatus> _snapshot;
@@ -58,7 +62,8 @@ internal sealed class TrayIconHost : IDisposable
                          Action<bool>? setCardVisible,
                          Action? toggleAdjust,
                          Func<bool>? isAdjusting,
-                         Func<bool>? isAdjustAvailable)
+                         Func<bool>? isAdjustAvailable,
+                         Action? openSettings)
     {
         _snapshot = snapshot ?? throw new ArgumentNullException(nameof(snapshot));
         _setUserPaused = setUserPaused ?? throw new ArgumentNullException(nameof(setUserPaused));
@@ -109,8 +114,19 @@ internal sealed class TrayIconHost : IDisposable
             _menu.Items.Add(new Forms.ToolStripMenuItem("调整组件位置（M8 未实现）") { Enabled = false });
         }
 
-        // M9 的入口先摆出来但禁用（已确认的决策），并明确标注“未实现”。
-        _menu.Items.Add(new Forms.ToolStripMenuItem("设置（M8/M9 未实现）") { Enabled = false });
+        // 设置入口（M9-2 起真实可用）：限额与「软件与分类」都在主界面里，因此它 = 打开主界面。
+        // 未接线时（M5b 时代的 4 参调用 / 早期自检）保留**禁用占位** —— 菜单形态不被悄悄改动，
+        // 而“点了没反应”比“看起来能点”诚实。
+        if (openSettings is not null)
+        {
+            _settingsItem = new Forms.ToolStripMenuItem("设置…");
+            _settingsItem.Click += (_, _) => Safe(openSettings);
+            _menu.Items.Add(_settingsItem);
+        }
+        else
+        {
+            _menu.Items.Add(new Forms.ToolStripMenuItem("设置（未接线）") { Enabled = false });
+        }
 
         _menu.Items.Add(new Forms.ToolStripSeparator());
 
@@ -161,6 +177,10 @@ internal sealed class TrayIconHost : IDisposable
     /// 为 null 时按“可用”处理 —— 这样 M6/M7 已建立的调用形态与菜单形态原样不变。
     /// 返回 false 时该菜单项**禁用**：点了没反应比“看起来能点”诚实。
     /// </param>
+    /// <param name="openSettings">
+    /// 「设置…」的动作（M9-2）。为 null 时保留**禁用占位**（早期调用形态与菜单形态不变）。
+    /// 产品的实现是“打开主界面” —— 限额与分类都在那里。
+    /// </param>
     public static TrayIconHost? TryCreate(Func<RuntimeStatus> snapshot,
                                           Action<bool> setUserPaused,
                                           Action openMainWindow,
@@ -169,12 +189,14 @@ internal sealed class TrayIconHost : IDisposable
                                           Action<bool>? setCardVisible,
                                           Action? toggleAdjust = null,
                                           Func<bool>? isAdjusting = null,
-                                          Func<bool>? isAdjustAvailable = null)
+                                          Func<bool>? isAdjustAvailable = null,
+                                          Action? openSettings = null)
     {
         try
         {
             return new TrayIconHost(snapshot, setUserPaused, openMainWindow, exit,
-                                    isCardVisible, setCardVisible, toggleAdjust, isAdjusting, isAdjustAvailable);
+                                    isCardVisible, setCardVisible, toggleAdjust, isAdjusting, isAdjustAvailable,
+                                    openSettings);
         }
         catch
         {
@@ -277,6 +299,25 @@ internal sealed class TrayIconHost : IDisposable
         return text.Length > 63 ? text.Substring(0, 63) : text;
     }
 
+    /// <summary>
+    /// 弹一个托盘气泡（限额提醒，M9-2）。
+    ///
+    /// 为什么先用气泡而不是 Windows Toast：
+    ///  * 零依赖、零 AUMID 注册 —— 而 Toast 需要一个已注册的 AppUserModelID，实测风险不小；
+    ///  * **发送动作集中在这一个方法里**：将来换成真 Toast 时，限额引擎、组合根、界面
+    ///    一行都不用改（这正是当初把“提醒发送”抽成单一入口的目的）。
+    ///
+    /// 失败一律吞掉：通知失败不该影响统计，更不该弹一个错误框去打断用户。
+    /// </summary>
+    public void ShowNotification(string title, string text)
+    {
+        try
+        {
+            _notifyIcon.ShowBalloonTip(10000, title ?? "ScreenSpy", text ?? string.Empty, Forms.ToolTipIcon.Info);
+        }
+        catch { /* 通知失败不影响统计 */ }
+    }
+
     private static string Format(TimeSpan value)
         => $"{(int)value.TotalHours}:{value.Minutes:D2}:{value.Seconds:D2}";
 
@@ -331,6 +372,17 @@ internal sealed class TrayIconHost : IDisposable
     {
         if (_adjustItem is null) return false;
         _adjustItem.PerformClick();
+        return true;
+    }
+
+    /// <summary>
+    /// **仅供自检与诊断**：走与真实点击「设置…」完全相同的路径。
+    /// 未接线时返回 false，便于自检断言“菜单里根本没有可点的设置项”。
+    /// </summary>
+    internal bool InvokeSettingsForDiagnostics()
+    {
+        if (_settingsItem is null) return false;
+        _settingsItem.PerformClick();
         return true;
     }
 

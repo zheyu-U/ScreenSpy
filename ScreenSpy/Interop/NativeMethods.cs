@@ -97,9 +97,6 @@ internal static class NativeMethods
     public const uint WINEVENT_OUTOFCONTEXT = 0x0000;
     public const uint WINEVENT_SKIPOWNPROCESS = 0x0002;
 
-    // DWM
-    public const uint DWMWA_CLOAKED = 14;
-
     // 睡眠测试（M2 自检 --sleep-test）：唤醒定时器 + SE_SHUTDOWN_NAME 权限
     public const uint TOKEN_ADJUST_PRIVILEGES = 0x0020;
     public const uint TOKEN_QUERY = 0x0008;
@@ -388,9 +385,6 @@ internal static class NativeMethods
     [DllImport("user32.dll", SetLastError = true)]
     public static extern uint GetDpiForSystem();
 
-    [DllImport("user32.dll", SetLastError = true)]
-    public static extern uint GetDpiForWindow(IntPtr hwnd);
-
     /// <summary>取得“最后一次用户输入”的时间戳（32 位 tick）。M1 空闲检测的数据源。</summary>
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
@@ -420,11 +414,6 @@ internal static class NativeMethods
 
     [DllImport("shcore.dll", SetLastError = true)]
     public static extern int SetProcessDpiAwareness(int value);
-
-    // ---------------------------------------------------------------- dwmapi
-
-    [DllImport("dwmapi.dll", SetLastError = true)]
-    public static extern int DwmGetWindowAttribute(IntPtr hwnd, uint dwAttribute, out int pvAttribute, int cbAttribute);
 
     // ---------------------------------------------------------------- gdi32
 
@@ -633,32 +622,4 @@ internal static class NativeMethods
         return index;
     }
 
-    /// <summary>
-    /// DWM 遮盖状态。<c>0</c> = 未被遮盖（会被 DWM 合成到屏幕）；非 0 = 不会被合成。
-    /// 供“窗口被完全遮挡时暂停渲染”之类的后续优化使用。
-    /// </summary>
-    public static string CloakedOf(IntPtr hwnd)
-    {
-        if (hwnd == IntPtr.Zero) return "(null)";
-
-        int v;
-        int hr;
-        try
-        {
-            hr = DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, out v, sizeof(int));
-        }
-        catch (Exception ex)
-        {
-            return "查询失败：" + ex.Message;
-        }
-
-        if (hr != 0) return $"查询失败 hr=0x{hr:X8}";
-        if (v == 0) return "0（未遮盖 → 会被合成）";
-
-        var parts = new List<string>();
-        if ((v & 0x1) != 0) parts.Add("APP");
-        if ((v & 0x2) != 0) parts.Add("SHELL");
-        if ((v & 0x4) != 0) parts.Add("INHERITED(随父/所有者)");
-        return $"{v}（被遮盖：{string.Join("|", parts)}）";
-    }
 }

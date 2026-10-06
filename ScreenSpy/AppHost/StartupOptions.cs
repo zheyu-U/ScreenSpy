@@ -34,6 +34,17 @@ internal sealed class StartupOptions
     /// </summary>
     public bool CardEnabled { get; set; } = true;
 
+    /// <summary>
+    /// 是否由**开机自启**拉起（M12，<c>--autorun</c>）。
+    ///
+    /// 由注册表 Run 键里的命令行带上，用来区分"登录时被系统拉起"与"用户手动双击"：
+    /// 前者只进托盘、不显示主界面（用户决策）。
+    ///
+    /// 为什么不靠"猜"（例如判断父进程是不是 explorer）：那类判据在真实环境里不稳定，
+    /// 而命令行是**我们自己写进注册表的**，是唯一确定的信号。
+    /// </summary>
+    public bool AutoRun { get; set; }
+
     /// <summary>数据库文件路径。默认 <see cref="StorageOptions.DefaultDatabasePath"/>。</summary>
     public string DatabasePath { get; set; } = StorageOptions.DefaultDatabasePath;
 
@@ -81,6 +92,7 @@ internal sealed class StartupOptions
     ///   --no-store             关闭 SQLite 落库
     ///   --no-raw-log           关闭原始活动日志
     ///   --no-card              启动时不显示桌面卡片（M6）
+    ///   --autorun              由开机自启拉起（M12）：只进托盘，不显示主界面
     ///   --idle-threshold=&lt;秒&gt;  空闲阈值（默认 300）
     ///   --heartbeat=&lt;毫秒&gt;     心跳间隔（默认 1000，最小 100）
     ///   --flush-ms=&lt;毫秒&gt;      落库间隔（默认 15000，最小 1000）
@@ -128,6 +140,11 @@ internal sealed class StartupOptions
 
                 case "--no-card":
                     options.CardEnabled = false;
+                    break;
+
+                case "--autorun":
+                    // M12：由注册表 Run 键带上，只影响"要不要显示主界面"，不影响任何统计口径。
+                    options.AutoRun = true;
                     break;
 
                 case "--db":
