@@ -1,0 +1,47 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    ============================================================================
+    ScreenSpy · 产品工程
+
+    M0 结论落地（Windows 11 26H2 实测）：
+      路线 A（真嵌入 WorkerW + 子窗口渲染）不成立 → 采用路线 B+：
+      顶层分层窗口 + z 序自锁 + “显示桌面”检测复位。详见 docs/M0-B+验证.md。
+
+    属性说明：
+      * ImplicitUsings=disable：本工程同时使用 WPF 与 System.Drawing(GDI+)。
+        两者的隐式 using 会同时引入 System.Windows* 与 System.Drawing，
+        使 Size / Point / Color / FontFamily 等类型产生二义性。
+        因此关闭隐式 using，各文件显式引入所需命名空间。
+      * UseWPF=true：主界面（设置 / 统计窗口）使用 WPF。
+      * UseWindowsForms=true：仅用于获得 GDI+（System.Drawing），
+        桌面卡片用 UpdateLayeredWindow 做逐像素 alpha 渲染。
+        本工程不创建任何 WinForms 窗体 / 控件。
+      * AllowUnsafeBlocks=true：DIB 像素拷贝与截屏像素判定需要 unsafe。
+    ============================================================================
+  -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>ScreenSpy</RootNamespace>
+    <AssemblyName>ScreenSpy</AssemblyName>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      M4：SQLite 存储（开发文档 §5.6）。
+        单文件数据库，免安装服务端；本包会连带引入 SQLitePCLRaw 的
+        原生 e_sqlite3（win-x64），因此首次 restore 需要联网下载一次。
+      版本与运行时对齐：本机 .NET 运行时为 10.0.12，故选用同补丁号 10.0.12，
+        避免 Microsoft.Data.Sqlite 与运行时版本错配。
+    -->
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.12" />
+  </ItemGroup>
+
+</Project>

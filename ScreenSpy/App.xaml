@@ -1,0 +1,11 @@
+﻿<Application x:Class="ScreenSpy.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:ScreenSpy">
+    <!-- 不使用 StartupUri：启动去向由 App.OnStartup 决定。
+         无参数 → 产品启动（装配 M1–M4，主窗口显示运行状态）；
+         带自检/演示参数 → 对应入口，跑完即退出。 -->
+    <Application.Resources>
+         
+    </Application.Resources>
+</Application>

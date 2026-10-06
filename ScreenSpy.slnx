@@ -1,0 +1,21 @@
+<Solution>
+  <Folder Name="/doc/">
+    <File Path="docs/1005.md" />
+    <File Path="docs/M0-B+验证.md" />
+    <File Path="docs/M0-问题与解决.md" />
+    <File Path="docs/M0验证结论.md" />
+    <File Path="docs/M1-验证.md" />
+    <File Path="docs/M2-验证.md" />
+    <File Path="docs/M3-原始活动日志.md" />
+    <File Path="docs/M3-验证.md" />
+    <File Path="docs/M4-验证.md" />
+    <File Path="docs/M5a-产品启动接入.md" />
+    <File Path="docs/M5b-托盘与关闭不退出.md" />
+    <File Path="docs/M6-验证.md" />
+    <File Path="docs/对话流程记录.md" />
+    <File Path="docs/对话纪要.md" />
+    <File Path="docs/开发文档.md" />
+    <File Path="docs/阶段总结.md" />
+  </Folder>
+  <Project Path="ScreenSpy/ScreenSpy.csproj" />
+</Solution>
