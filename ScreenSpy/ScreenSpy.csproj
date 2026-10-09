@@ -42,6 +42,7 @@
         避免 Microsoft.Data.Sqlite 与运行时版本错配。
     -->
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.12" />
+    <PackageReference Include="SkiaSharp" Version="2.88.9" />
   </ItemGroup>
 
 </Project>

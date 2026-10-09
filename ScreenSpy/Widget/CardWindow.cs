@@ -8,7 +8,14 @@ using ScreenSpy.Rendering;
 namespace ScreenSpy.Widget;
 
 /// <summary>
-/// 组件卡片窗口（M6 建立，M7 扩为**双形态**）：把「原生分层窗口 + GDI+ 渲染」装成一个可选择形态的卡片。
+/// 组件卡片窗口（M6 建立，M7 扩为**双形态**）：把「原生分层窗口 + 可替换渲染器」装成一个可选择形态的卡片。
+///
+/// M13 之后渲染引擎是**可替换的**（<see cref="ICardRenderer"/>，现为 SkiaSharp），
+/// 由 <see cref="CardRendererFactory"/> 单点选择。本类只负责"给渲染器一块像素缓冲、然后把缓冲上屏"，
+/// **不认识任何具体引擎** —— 这也是"窗口层冻结"的含义：换引擎、改外观都不该动窗口行为。
+/// 外观升级把窗口放大了一圈（<see cref="CardGeometry.ShadowMargin"/>）给投影留位置，
+/// 样式 / 命中测试 / z 序 / 坐标换算**一行未动**；代价是窗口左上角不再等于卡片左上角
+/// （相差一个边距），这是刻意选的方案：换来"任何坐标换算都不用改"。
 ///
 /// ── 两种形态是**同一个窗口**的两种参数组合（M7 的关键决定）──
 /// 单 HWND、单 STA 线程、共用一份坐标，切换时只改三样东西（全部落在窗口线程上）：
@@ -36,8 +43,14 @@ namespace ScreenSpy.Widget;
 /// </summary>
 internal sealed class CardWindow : IDisposable
 {
-    public const int DefaultWidth = 400;
-    public const int DefaultHeight = 360;
+    /// <summary>
+    /// 分层窗口尺寸（**不等于**卡片可视尺寸）：卡片可视区由 <see cref="CardGeometry"/> 定义，
+    /// 窗口每边比它大一圈，多出来的部分用来画外侧柔和投影。
+    /// 自检与演示都拿这两个常量当"卡片尺寸"，因此它们必须始终等于渲染缓冲尺寸
+    /// （渲染器在构造时会硬校验，不一致直接抛）。
+    /// </summary>
+    public const int DefaultWidth = CardGeometry.WindowWidth;
+    public const int DefaultHeight = CardGeometry.WindowHeight;
 
     /// <summary>默认坐标（1920×1200 上不会被任务栏或屏幕边缘裁掉）。</summary>
     public const int DefaultX = 200;
@@ -57,15 +70,28 @@ internal sealed class CardWindow : IDisposable
     /// 因此能在截屏里被精确定位 —— 这是“像素真的上了屏”的唯一证据（M0 最重要的教训）。
     /// 仅演示 / 自检时绘制，产品默认不画。
     /// </summary>
-    public static readonly Color DebugMarkerColor = Color.FromArgb(255, 255, 0, 170);
+    ///
+    /// M13：常量本体搬到了 <see cref="CardMarkers"/> —— 因为标记现在由**渲染器**画
+    /// （<see cref="ICardRenderer.Draw"/> 的参数），而渲染层不该反向依赖 <c>Widget</c> 层。
+    /// 这里保留**同名转发**，因此既有调用点（<c>DesktopCardDemo</c> 等）一行都不用改。
+    /// </summary>
+    public static Color DebugMarkerColor => CardMarkers.MarkerColor;
 
-    public static readonly Rectangle DefaultDebugMarker = new(10, 10, 24, 24);
+    public static Rectangle DefaultDebugMarker => CardMarkers.DefaultRect;
 
     /// <summary>形态切换的等待上限（自检与 UI 都用它，避免界面卡死）。</summary>
     public const int ModeSwitchTimeoutMs = 3000;
 
     private readonly Func<CardModel> _modelFactory;
-    private readonly CardRenderer _renderer = new();
+
+    /// <summary>
+    /// 卡片渲染器（M13 起由 <see cref="CardRendererFactory"/> **单点**选择；外观升级后只剩 Skia 一个实现）。
+    ///
+    /// 刻意不做成"字段初始值"：路径 (b) 的渲染器持有引擎侧常驻位图，必须在
+    /// **卡片线程上、按窗口真实尺寸**创建，并在同一条线程上释放（见 <see cref="ThreadMain"/>）。
+    /// </summary>
+    private ICardRenderer? _renderer;
+
     private readonly Rectangle? _debugMarker;
     private readonly Action<int, int>? _onPositionChanged;
     private readonly ManualResetEventSlim _firstFrame = new(false);
@@ -395,6 +421,10 @@ internal sealed class CardWindow : IDisposable
             host.Create();
             _host = host;
 
+            // 渲染器：按窗口真实尺寸在此创建（**卡片线程上**）。它有状态（持一块常驻位图），
+            // 因此绝不能每帧新建，也不能跨线程用 —— 生命周期严格与本次线程运行对齐。
+            _renderer = CardRendererFactory.Create(_width, _height);
+
             // 嵌入：压到最底（贴桌面之上、其它普通窗口之下）；浮动：抬到最前，便于拖动。
             NativeMethods.SetWindowPos(host.Handle,
                 embedded ? NativeMethods.HWND_BOTTOM : NativeMethods.HWND_TOP,
@@ -427,6 +457,8 @@ internal sealed class CardWindow : IDisposable
             _firstFrame.Set();   // 失败路径也要放行，否则 Start() 会白等 10 秒
             StopZOrder();
             _host = null;
+            try { _renderer?.Dispose(); } catch { /* 销毁期异常忽略 */ }
+            _renderer = null;
             try { host?.Dispose(); } catch { /* 销毁期异常忽略 */ }
         }
     }
@@ -574,18 +606,19 @@ internal sealed class CardWindow : IDisposable
             model = new CardModel { CurrentApp = "取数失败：" + ex.GetType().Name };
         }
 
-        _renderer.Draw(host.Surface.Graphics, host.Surface.Size, model);
+        ICardRenderer? renderer = _renderer;
+        if (renderer is null) return;   // 渲染器尚未就绪（或已释放）：这一帧不画，也不上屏
 
-        if (_debugMarker is { } marker)
-        {
-            using var brush = new SolidBrush(DebugMarkerColor);
-            host.Surface.Graphics.FillRectangle(brush, marker);
-        }
+        // 渲染器只知道"往哪块缓冲写"（bits + stride），不认识窗口、不认识 Present，
+        // 更不认识 GDI+ 或 Skia 之外的东西 —— 这就是 M13 换引擎**不动窗口层**的原因。
+        // 调试标记作为参数传入（M0 像素判定的锚点，由渲染器一并画上）。
+        LayeredSurface surface = host.Surface;
+        renderer.Draw(surface.Bits, surface.Width, surface.Height, surface.Stride, model, _debugMarker);
 
         // 嵌入：pptDst 定位（B+ 的既有做法，坐标就是 _x/_y）；
         // 浮动：pptDst = NULL —— 否则每帧重绘都会把用户拖动后的位置拽回原位。
-        if (Mode == WidgetMode.Embedded) host.Surface.Present(host.Handle, _x, _y);
-        else host.Surface.Present(host.Handle, null, null);
+        if (Mode == WidgetMode.Embedded) surface.Present(host.Handle, _x, _y);
+        else surface.Present(host.Handle, null, null);
 
         _frames++;
     }

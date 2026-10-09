@@ -6,7 +6,7 @@ namespace ScreenSpy.Rendering;
 /// 桌面卡片要显示的数据模型。
 ///
 /// 这是**纯数据**：无逻辑、无数据来源 —— 卡片每帧从 <c>ModelFactory</c> 取一份新的把它交给
-/// <see cref="CardRenderer"/> 画出来。因此“绑定”在本项目里就是一个返回本对象的委托 + 每秒拉取，
+/// <see cref="ICardRenderer"/> 画出来。因此“绑定”在本项目里就是一个返回本对象的委托 + 每秒拉取，
 /// 没有 WPF 数据绑定，也没有属性通知。
 ///
 /// M6 起 <see cref="LimitText"/> 为空表示“还没有限额数据”（M9 才有）：

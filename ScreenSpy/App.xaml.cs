@@ -133,6 +133,15 @@ namespace ScreenSpy
                 return;
             }
 
+            // M13 自检入口（卡片渲染换 SkiaSharp：像素语义取证 / 与 GDI+ 基线逐像素对照 /
+            //                布局锚点 / 接缝契约 / 窗口层回归 + 截屏像素）：
+            //   ScreenSpy.exe --m13-selfcheck
+            if (M13SelfCheck.IsRequested(e.Args))
+            {
+                Shutdown(M13SelfCheck.Run(e.Args));
+                return;
+            }
+
             // 桌面卡片演示入口（M0 结论落地用；**长期保留** —— 卡片接入产品（M6/M7）之前，
             // 它是唯一能观测桌面层行为的手段）：
             //   ScreenSpy.exe --demo-card [--seconds=8] [--win-d] [--no-marker]

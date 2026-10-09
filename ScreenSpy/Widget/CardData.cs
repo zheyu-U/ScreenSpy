@@ -17,7 +17,13 @@ namespace ScreenSpy.Widget;
 /// </summary>
 internal static class CardData
 {
-    /// <summary>卡片上最多列几行软件（400×360 的排版实测可容纳 5 行 + 每行的小进度条）。</summary>
+    /// <summary>
+    /// 卡片上最多列几行软件（卡片可视区 400×400 的排版实测可容纳 5 行 + 每行的小进度条）。
+    ///
+    /// 这里是**数据策略**（我们选择显示几行），<c>CardLayout.MaxRows</c> 是**排版容量**（装得下几行）——
+    /// 两个"5"含义不同，因此由 <c>--m13-selfcheck</c> 的 B6c 断言"策略 ≤ 容量"：
+    /// 谁把这里调到 6，自检会立刻指出排版装不下，而不是等到卡片溢出才发现。
+    /// </summary>
     public const int MaxRows = 5;
 
     /// <summary>

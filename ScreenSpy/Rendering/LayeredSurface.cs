@@ -1,23 +1,32 @@
 using System;
 using System.ComponentModel;
 using System.Drawing;
-using System.Drawing.Drawing2D;
-using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 using ScreenSpy.Interop;
 
 namespace ScreenSpy.Rendering;
 
 /// <summary>
-/// 一块“内存 DC + 32bpp DIB + GDI+ 绘图表面”，可直接交给 UpdateLayeredWindow 做逐像素合成。
+/// 一块“内存 DC + 32bpp DIB”，可直接交给 UpdateLayeredWindow 做逐像素合成。
 ///
-/// 关键点：
-///  * DIB 为自顶向下（biHeight 为负）的 32bpp BI_RGB，字节序 BGRA；
-///  * GDI+ 侧使用 <see cref="PixelFormat.Format32bppPArgb"/>（预乘 alpha），
-///    因为 UpdateLayeredWindow 在 AC_SRC_ALPHA 下要求预乘结果；
-///  * 每帧把 GDI+ 画好的位图拷进 DIB，然后 Present。
+/// ── M13 瘦身（决策 D85）──
+/// 本类**不再持有 GDI+ 的 Bitmap / Graphics，也不再负责把画面拷进 DIB**
+/// （<c>_bitmap</c>、<c>_graphics</c>、<c>BlitToDib()</c> 整段删除，157 行 → 约 110 行）。
+/// 现在它只做两件事，且**与“用哪个引擎画”彻底无关**：
+/// <list type="number">
+///   <item>提供目标缓冲：渲染器把像素画进 <see cref="Bits"/>（自顶向下 32bpp 预乘 BGRA，行距 <see cref="Stride"/>）；</item>
+///   <item>提交：<see cref="Present"/> 把这块缓冲交给分层窗口。</item>
+/// </list>
+/// 于是渲染器与"像素怎么上屏"彻底解耦：换引擎、改外观都只影响"谁往缓冲里画"。
+/// （M13 时这里曾用来让 GDI+ 与 Skia 两个实现互 diff；GDI+ 实现已在外观升级时移除，
+/// 自检改为直接对**外观不变量**下断言 —— 见 `--m13-selfcheck`。）
 ///
-/// 来源：M0 验证（Spike）中经实测有效的实现，原样移植。
+/// ── 一行未动的部分（关键）──
+/// DIB 的格式（自顶向下 32bpp <c>BI_RGB</c>、字节序 BGRA）与 <see cref="Present"/> 的整条
+/// <c>UpdateLayeredWindow</c> 路径，都是 M0/M6 用**截屏像素**判定验证过的，M13 不碰：
+/// 换引擎只换“谁往缓冲里画”，不换“缓冲怎么上屏”。
+///
+/// 来源：M0 验证（Spike）中经实测有效的实现。
 /// </summary>
 internal sealed class LayeredSurface : IDisposable
 {
@@ -28,14 +37,23 @@ internal sealed class LayeredSurface : IDisposable
     private readonly IntPtr _dib;
     private readonly IntPtr _oldBitmap;
     private readonly IntPtr _bits;
-    private readonly Bitmap _bitmap;
-    private readonly Graphics _graphics;
     private bool _disposed;
 
-    /// <summary>供调用方绘制卡片内容（坐标系原点在卡片左上角）。</summary>
-    public Graphics Graphics => _graphics;
-
     public Size Size => new(_width, _height);
+
+    public int Width => _width;
+
+    public int Height => _height;
+
+    /// <summary>
+    /// DIB 像素首字节 —— **渲染器的绘制目标**。
+    /// 格式：自顶向下（顶行在前）、32bpp、字节序 BGRA、**预乘 alpha**。
+    /// 该契约与 <see cref="CardRenderTarget"/> 是同一份（两者若不一致，像素会在屏幕上错位或偏色）。
+    /// </summary>
+    public IntPtr Bits => _bits;
+
+    /// <summary>DIB 行距（字节）。32bpp 下恒为 <c>width * 4</c>（DIB 无额外对齐填充）。</summary>
+    public int Stride => CardRenderTarget.StrideFor(_width);
 
     public LayeredSurface(int width, int height)
     {
@@ -68,16 +86,11 @@ internal sealed class LayeredSurface : IDisposable
             throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateDIBSection 失败");
 
         _oldBitmap = NativeMethods.SelectObject(_memDc, _dib);
-
-        _bitmap = new Bitmap(width, height, PixelFormat.Format32bppPArgb);
-        _graphics = Graphics.FromImage(_bitmap);
-        _graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        _graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
-        _graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
-        _graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
     }
 
-    /// <summary>把当前位图内容提交到分层窗口。</summary>
+    /// <summary>
+    /// 把当前缓冲内容提交到分层窗口（<see cref="Bits"/> 里的像素必须已经画好）。
+    /// </summary>
     /// <param name="hwnd">分层窗口句柄。</param>
     /// <param name="x">
     /// 目标位置（屏幕坐标）。<c>null</c> 表示“子窗口模式”：
@@ -88,7 +101,6 @@ internal sealed class LayeredSurface : IDisposable
     public void Present(IntPtr hwnd, int? x, int? y)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        BlitToDib();
 
         var size = new NativeMethods.SIZE(_width, _height);
         var src = new NativeMethods.POINT(0, 0);
@@ -115,38 +127,10 @@ internal sealed class LayeredSurface : IDisposable
             throw new Win32Exception(Marshal.GetLastWin32Error(), "UpdateLayeredWindow 失败");
     }
 
-    private void BlitToDib()
-    {
-        _graphics.Flush(FlushIntention.Sync);
-
-        var rect = new Rectangle(0, 0, _width, _height);
-        BitmapData data = _bitmap.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format32bppPArgb);
-        try
-        {
-            int rowBytes = _width * 4;
-            unsafe
-            {
-                for (int row = 0; row < _height; row++)
-                {
-                    void* srcPtr = (byte*)data.Scan0 + (long)row * data.Stride;
-                    void* dstPtr = (byte*)_bits + (long)row * rowBytes;
-                    Buffer.MemoryCopy(srcPtr, dstPtr, rowBytes, rowBytes);
-                }
-            }
-        }
-        finally
-        {
-            _bitmap.UnlockBits(data);
-        }
-    }
-
     public void Dispose()
     {
         if (_disposed) return;
         _disposed = true;
-
-        _graphics.Dispose();
-        _bitmap.Dispose();
 
         if (_oldBitmap != IntPtr.Zero && _memDc != IntPtr.Zero)
             NativeMethods.SelectObject(_memDc, _oldBitmap);

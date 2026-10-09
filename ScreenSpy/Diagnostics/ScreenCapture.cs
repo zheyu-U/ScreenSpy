@@ -57,14 +57,33 @@ internal static class ScreenCapture
         return full;
     }
 
-    /// <summary>在截屏里统计指定颜色的像素数与包围盒（容差按通道绝对值）。</summary>
-    public static ColorHit Analyze(string path, Color color, int tolerance = 6)
+    /// <summary>
+    /// 在截屏里统计指定颜色的像素数与包围盒（容差按通道绝对值）。
+    /// </summary>
+    /// <param name="region">
+    /// 可选的**限定区域**（截屏图像坐标）。传它就只在该区域内统计。
+    ///
+    /// 为什么需要它（M13 实测教训）：全屏扫描会**误命中别处的相似像素** ——
+    /// 自检里曾出现"在 (542,282) 找到 1853 个标记色像素，而卡片在 (200,700)"这种情况。
+    /// 判定"卡片真的上了屏"必须限定在**卡片自己的矩形**内，否则这条判据会给出假阳性。
+    /// </param>
+    public static ColorHit Analyze(string path, Color color, int tolerance = 6, Rectangle? region = null)
     {
         if (!File.Exists(path)) return new ColorHit { Count = 0, Bounds = Rectangle.Empty };
 
         using var bmp = new Bitmap(path);
         int w = bmp.Width;
         int h = bmp.Height;
+
+        int x0 = 0, y0 = 0, x1 = w, y1 = h;
+        if (region is { } regionRect)
+        {
+            x0 = Math.Max(0, regionRect.Left);
+            y0 = Math.Max(0, regionRect.Top);
+            x1 = Math.Min(w, regionRect.Right);
+            y1 = Math.Min(h, regionRect.Bottom);
+            if (x0 >= x1 || y0 >= y1) return new ColorHit { Count = 0, Bounds = Rectangle.Empty };
+        }
 
         BitmapData data = bmp.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
 
@@ -78,10 +97,10 @@ internal static class ScreenCapture
                 int stride = data.Stride;
                 int abs = Math.Abs(stride);
 
-                for (int y = 0; y < h; y++)
+                for (int y = y0; y < y1; y++)
                 {
                     byte* row = (byte*)data.Scan0 + (long)(stride >= 0 ? y : (h - 1 - y)) * abs;
-                    for (int x = 0; x < w; x++)
+                    for (int x = x0; x < x1; x++)
                     {
                         byte* px = row + (long)x * 4;
                         byte b = px[0];
